@@ -44,6 +44,15 @@ On first run in `AUTH_MODE=phone`, Telethon will ask for your phone number, logi
 
 For QR login, set `AUTH_MODE=qr`, run the script, and scan the terminal QR in Telegram: `Settings -> Devices -> Link Desktop Device`.
 
+To print available chats and IDs:
+```bash
+python forwarder.py --list-chats
+```
+Optional limit:
+```bash
+python forwarder.py --list-chats --list-limit 500
+```
+
 ## Notes
 - `SOURCE_CHATS` supports `@username`, links, and numeric IDs.
 - `TARGET_CHAT` supports `@username`, links, and numeric IDs.

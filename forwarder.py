@@ -1,4 +1,5 @@
 import asyncio
+import argparse
 from getpass import getpass
 import logging
 import os
@@ -18,7 +19,7 @@ class Settings:
     api_hash: str
     session_name: str
     source_chats: list[str]
-    target_chat: str | int
+    target_chat: str | int | None
     auth_mode: str
     skip_outgoing: bool
 
@@ -36,7 +37,7 @@ def _parse_auth_mode(value: str | None) -> str:
     return mode
 
 
-def load_settings() -> Settings:
+def load_settings(require_routing: bool = True) -> Settings:
     load_dotenv()
 
     api_id_raw = os.getenv("API_ID")
@@ -48,21 +49,25 @@ def load_settings() -> Settings:
         raise ValueError("Environment variable API_ID is required")
     if not api_hash:
         raise ValueError("Environment variable API_HASH is required")
-    if not source_chats_raw.strip():
-        raise ValueError("Environment variable SOURCE_CHATS is required")
-    if not target_chat.strip():
-        raise ValueError("Environment variable TARGET_CHAT is required")
 
     try:
         api_id = int(api_id_raw)
     except ValueError as exc:
         raise ValueError("API_ID must be an integer") from exc
 
-    source_chats = [item.strip() for item in source_chats_raw.split(",") if item.strip()]
-    if not source_chats:
-        raise ValueError("SOURCE_CHATS must contain at least one chat reference")
+    source_chats: list[str] = []
+    target_chat_ref: str | int | None = None
+    if require_routing:
+        if not source_chats_raw.strip():
+            raise ValueError("Environment variable SOURCE_CHATS is required")
+        if not target_chat.strip():
+            raise ValueError("Environment variable TARGET_CHAT is required")
 
-    target_chat_ref = _coerce_ref(target_chat.strip())
+        source_chats = [item.strip() for item in source_chats_raw.split(",") if item.strip()]
+        if not source_chats:
+            raise ValueError("SOURCE_CHATS must contain at least one chat reference")
+
+        target_chat_ref = _coerce_ref(target_chat.strip())
 
     return Settings(
         api_id=api_id,
@@ -128,6 +133,44 @@ def _print_qr(url: str) -> None:
     print()
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Telegram auto-forward service")
+    parser.add_argument(
+        "--list-chats",
+        action="store_true",
+        help="Print available dialogs with IDs and exit",
+    )
+    parser.add_argument(
+        "--list-limit",
+        type=int,
+        default=200,
+        help="How many dialogs to show with --list-chats (default: 200)",
+    )
+    return parser.parse_args()
+
+
+def _dialog_type(entity: Any) -> str:
+    if isinstance(entity, types.User):
+        return "user"
+    if isinstance(entity, types.Channel):
+        return "supergroup" if entity.megagroup else "channel"
+    if isinstance(entity, types.Chat):
+        return "group"
+    return type(entity).__name__.lower()
+
+
+async def _list_dialogs(client: TelegramClient, limit: int) -> None:
+    print("peer_id | entity_id | type | title")
+    print("-" * 90)
+    async for dialog in client.iter_dialogs(limit=limit):
+        entity = dialog.entity
+        peer_id = get_peer_id(entity)
+        entity_id = getattr(entity, "id", "n/a")
+        chat_type = _dialog_type(entity)
+        title = dialog.name or _entity_label(entity)
+        print(f"{peer_id} | {entity_id} | {chat_type} | {title}")
+
+
 async def _authorize_client(client: TelegramClient, settings: Settings) -> None:
     if settings.auth_mode == "phone":
         await client.start()
@@ -157,7 +200,8 @@ async def _authorize_client(client: TelegramClient, settings: Settings) -> None:
 
 
 async def main() -> None:
-    settings = load_settings()
+    args = _parse_args()
+    settings = load_settings(require_routing=not args.list_chats)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
@@ -165,6 +209,11 @@ async def main() -> None:
 
     client = TelegramClient(settings.session_name, settings.api_id, settings.api_hash)
     await _authorize_client(client, settings)
+
+    if args.list_chats:
+        await _list_dialogs(client, limit=args.list_limit)
+        await client.disconnect()
+        return
 
     source_entities = await _resolve_entities(client, settings.source_chats)
     target_entity = await client.get_entity(settings.target_chat)
