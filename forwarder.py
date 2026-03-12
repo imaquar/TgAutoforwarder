@@ -2,6 +2,7 @@ import asyncio
 from getpass import getpass
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -113,10 +114,18 @@ def _entity_label(entity: Any) -> str:
 
 
 def _print_qr(url: str) -> None:
-    qr = qrcode.QRCode(border=1)
+    qr = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        border=4,
+    )
     qr.add_data(url)
     qr.make(fit=True)
-    qr.print_ascii(invert=True)
+    print()
+    if sys.stdout.isatty():
+        qr.print_ascii(tty=True, invert=False)
+    else:
+        qr.print_ascii(invert=False)
+    print()
 
 
 async def _authorize_client(client: TelegramClient, settings: Settings) -> None:
