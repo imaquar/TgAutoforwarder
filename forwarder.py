@@ -1,11 +1,13 @@
 import asyncio
+from getpass import getpass
 import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Iterable
 
 from dotenv import load_dotenv
-from telethon import TelegramClient, events, functions, types
+import qrcode
+from telethon import TelegramClient, errors, events, functions, types
 from telethon.utils import get_peer_id
 
 
@@ -16,6 +18,7 @@ class Settings:
     session_name: str
     source_chats: list[str]
     target_chat: str | int
+    auth_mode: str
     skip_outgoing: bool
 
 
@@ -23,6 +26,13 @@ def _parse_bool(value: str | None, default: bool = True) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _parse_auth_mode(value: str | None) -> str:
+    mode = (value or "phone").strip().lower()
+    if mode not in {"phone", "qr"}:
+        raise ValueError("AUTH_MODE must be either 'phone' or 'qr'")
+    return mode
 
 
 def load_settings() -> Settings:
@@ -59,6 +69,7 @@ def load_settings() -> Settings:
         session_name=os.getenv("SESSION_NAME", "autoforwarder"),
         source_chats=source_chats,
         target_chat=target_chat_ref,
+        auth_mode=_parse_auth_mode(os.getenv("AUTH_MODE")),
         skip_outgoing=_parse_bool(os.getenv("SKIP_OUTGOING"), default=True),
     )
 
@@ -101,6 +112,41 @@ def _entity_label(entity: Any) -> str:
     return str(entity_id) if entity_id is not None else "Unknown"
 
 
+def _print_qr(url: str) -> None:
+    qr = qrcode.QRCode(border=1)
+    qr.add_data(url)
+    qr.make(fit=True)
+    qr.print_ascii(invert=True)
+
+
+async def _authorize_client(client: TelegramClient, settings: Settings) -> None:
+    if settings.auth_mode == "phone":
+        await client.start()
+        return
+
+    await client.connect()
+    if await client.is_user_authorized():
+        return
+
+    logging.info("QR login mode enabled.")
+    logging.info("Open Telegram -> Settings -> Devices -> Link Desktop Device, then scan the code below.")
+
+    while True:
+        qr_login = await client.qr_login()
+        _print_qr(qr_login.url)
+        print(f"QR URL (fallback): {qr_login.url}")
+
+        try:
+            await qr_login.wait(timeout=120)
+            break
+        except asyncio.TimeoutError:
+            logging.info("QR code expired. Generating a new one...")
+        except errors.SessionPasswordNeededError:
+            password = getpass("Enter your 2FA password: ")
+            await client.sign_in(password=password)
+            break
+
+
 async def main() -> None:
     settings = load_settings()
     logging.basicConfig(
@@ -109,7 +155,7 @@ async def main() -> None:
     )
 
     client = TelegramClient(settings.session_name, settings.api_id, settings.api_hash)
-    await client.start()
+    await _authorize_client(client, settings)
 
     source_entities = await _resolve_entities(client, settings.source_chats)
     target_entity = await client.get_entity(settings.target_chat)

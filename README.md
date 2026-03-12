@@ -7,6 +7,7 @@ A Python + Telethon service for automatically forwarding messages from multiple 
 - Sends them to `TARGET_CHAT`.
 - Adds a `[Source Chat Name]` prefix to the beginning of message text/caption.
 - Marks the target dialog as unread after each forwarded message.
+- Supports login by phone code or by QR (`AUTH_MODE=qr`).
 
 ## Installation
 ```bash
@@ -28,6 +29,7 @@ Example:
 API_ID=123456
 API_HASH=xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SESSION_NAME=autoforwarder
+AUTH_MODE=phone
 SOURCE_CHATS=@chat_one,@chat_two
 TARGET_CHAT=@my_target_chat
 SKIP_OUTGOING=true
@@ -38,7 +40,9 @@ SKIP_OUTGOING=true
 python forwarder.py
 ```
 
-On first run, Telethon will ask for your phone number, login code, and 2FA password (if enabled).
+On first run in `AUTH_MODE=phone`, Telethon will ask for your phone number, login code, and 2FA password (if enabled).
+
+For QR login, set `AUTH_MODE=qr`, run the script, and scan the terminal QR in Telegram: `Settings -> Devices -> Link Desktop Device`.
 
 ## Notes
 - `SOURCE_CHATS` supports `@username`, links, and numeric IDs.
