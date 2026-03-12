@@ -1,6 +1,7 @@
 import asyncio
 import argparse
 from getpass import getpass
+import json
 import logging
 import os
 import sys
@@ -22,6 +23,8 @@ class Settings:
     target_chat: str | int | None
     auth_mode: str
     skip_outgoing: bool
+    allowed_senders: list[str]
+    chat_allowed_senders: dict[str, list[str]]
 
 
 def _parse_bool(value: str | None, default: bool = True) -> bool:
@@ -35,6 +38,42 @@ def _parse_auth_mode(value: str | None) -> str:
     if mode not in {"phone", "qr"}:
         raise ValueError("AUTH_MODE must be either 'phone' or 'qr'")
     return mode
+
+
+def _parse_refs_csv(value: str | None) -> list[str]:
+    return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+
+def _parse_chat_allowed_senders(raw: str | None) -> dict[str, list[str]]:
+    if not raw or not raw.strip():
+        return {}
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("CHAT_ALLOWED_SENDERS must be valid JSON") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError("CHAT_ALLOWED_SENDERS must be a JSON object")
+
+    result: dict[str, list[str]] = {}
+    for chat_ref, sender_refs in payload.items():
+        if not isinstance(chat_ref, str):
+            raise ValueError("CHAT_ALLOWED_SENDERS keys must be strings")
+        if not isinstance(sender_refs, list):
+            raise ValueError("CHAT_ALLOWED_SENDERS values must be arrays")
+
+        normalized_refs: list[str] = []
+        for sender_ref in sender_refs:
+            normalized = str(sender_ref).strip()
+            if normalized:
+                normalized_refs.append(normalized)
+
+        if not normalized_refs:
+            raise ValueError(f"CHAT_ALLOWED_SENDERS entry for '{chat_ref}' cannot be empty")
+        result[chat_ref.strip()] = normalized_refs
+
+    return result
 
 
 def load_settings(require_routing: bool = True) -> Settings:
@@ -77,6 +116,8 @@ def load_settings(require_routing: bool = True) -> Settings:
         target_chat=target_chat_ref,
         auth_mode=_parse_auth_mode(os.getenv("AUTH_MODE")),
         skip_outgoing=_parse_bool(os.getenv("SKIP_OUTGOING"), default=True),
+        allowed_senders=_parse_refs_csv(os.getenv("ALLOWED_SENDERS")),
+        chat_allowed_senders=_parse_chat_allowed_senders(os.getenv("CHAT_ALLOWED_SENDERS")),
     )
 
 
@@ -171,6 +212,26 @@ async def _list_dialogs(client: TelegramClient, limit: int) -> None:
         print(f"{peer_id} | {entity_id} | {chat_type} | {title}")
 
 
+async def _resolve_allowed_sender_ids(client: TelegramClient, refs: list[str]) -> set[int]:
+    if not refs:
+        return set()
+    sender_entities = await _resolve_entities(client, refs)
+    return {get_peer_id(entity) for entity in sender_entities}
+
+
+async def _resolve_chat_sender_filters(
+    client: TelegramClient,
+    raw_filters: dict[str, list[str]],
+) -> dict[int, set[int]]:
+    resolved: dict[int, set[int]] = {}
+    for chat_ref, sender_refs in raw_filters.items():
+        chat_entity = await client.get_entity(_coerce_ref(chat_ref))
+        chat_peer_id = get_peer_id(chat_entity)
+        sender_ids = await _resolve_allowed_sender_ids(client, sender_refs)
+        resolved[chat_peer_id] = sender_ids
+    return resolved
+
+
 async def _authorize_client(client: TelegramClient, settings: Settings) -> None:
     if settings.auth_mode == "phone":
         await client.start()
@@ -220,14 +281,26 @@ async def main() -> None:
 
     source_peer_ids = {get_peer_id(entity) for entity in source_entities}
     target_peer_id = get_peer_id(target_entity)
+    global_allowed_sender_ids = await _resolve_allowed_sender_ids(client, settings.allowed_senders)
+    chat_allowed_sender_ids = await _resolve_chat_sender_filters(client, settings.chat_allowed_senders)
 
     if target_peer_id in source_peer_ids:
         logging.warning("Target chat is also in SOURCE_CHATS. Messages from it will be ignored to avoid loops.")
+    for chat_peer_id in chat_allowed_sender_ids:
+        if chat_peer_id not in source_peer_ids:
+            logging.warning(
+                "CHAT_ALLOWED_SENDERS contains chat %s that is not in SOURCE_CHATS. This filter will not be used.",
+                chat_peer_id,
+            )
 
     me = await client.get_me()
     logging.info("Connected as %s", me.username or me.id)
     logging.info("Target chat: %s", _entity_label(target_entity))
     logging.info("Source chats: %s", ", ".join(_entity_label(entity) for entity in source_entities))
+    if global_allowed_sender_ids:
+        logging.info("Global sender filter enabled: %s sender(s)", len(global_allowed_sender_ids))
+    if chat_allowed_sender_ids:
+        logging.info("Per-chat sender filter enabled for %s chat(s)", len(chat_allowed_sender_ids))
 
     @client.on(events.NewMessage(chats=source_entities))
     async def forward_message(event: events.NewMessage.Event) -> None:
@@ -236,6 +309,14 @@ async def main() -> None:
 
         if event.chat_id == target_peer_id:
             return
+
+        allowed_for_chat = chat_allowed_sender_ids.get(event.chat_id)
+        if allowed_for_chat is not None:
+            if event.sender_id is None or event.sender_id not in allowed_for_chat:
+                return
+        elif global_allowed_sender_ids:
+            if event.sender_id is None or event.sender_id not in global_allowed_sender_ids:
+                return
 
         message = event.message
         if message is None or message.action is not None:

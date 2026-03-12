@@ -33,6 +33,8 @@ AUTH_MODE=phone
 SOURCE_CHATS=@chat_one,@chat_two
 TARGET_CHAT=@my_target_chat
 SKIP_OUTGOING=true
+ALLOWED_SENDERS=
+CHAT_ALLOWED_SENDERS=
 ```
 
 ## Run
@@ -56,4 +58,18 @@ python forwarder.py --list-chats --list-limit 500
 ## Notes
 - `SOURCE_CHATS` supports `@username`, links, and numeric IDs.
 - `TARGET_CHAT` supports `@username`, links, and numeric IDs.
+- `ALLOWED_SENDERS` is optional and applies one sender list to all `SOURCE_CHATS`.
+- `CHAT_ALLOWED_SENDERS` is optional JSON with per-chat sender lists and has priority over `ALLOWED_SENDERS`.
+- Sender filters accept usernames and numeric IDs.
 - For some media types where captions are not available, the service sends a separate prefix message and then forwards the original message.
+
+## Sender Filter Examples
+Only selected senders from all source chats:
+```env
+ALLOWED_SENDERS=@boss,123456789
+```
+
+Different sender lists per chat:
+```env
+CHAT_ALLOWED_SENDERS={"@work_chat":["@boss","123456789"],"-1001234567890":["@teamlead","777000"]}
+```
