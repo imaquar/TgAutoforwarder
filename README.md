@@ -38,4 +38,5 @@ On first run, Telethon will ask for your phone number, login code, and 2FA passw
 
 ## Notes
 - `SOURCE_CHATS` supports `@username`, links, and numeric IDs.
+- `TARGET_CHAT` supports `@username`, links, and numeric IDs.
 - For some media types where captions are not available, the service sends a separate prefix message and then forwards the original message.

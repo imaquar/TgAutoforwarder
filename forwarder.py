@@ -15,7 +15,7 @@ class Settings:
     api_hash: str
     session_name: str
     source_chats: list[str]
-    target_chat: str
+    target_chat: str | int
     skip_outgoing: bool
 
 
@@ -51,17 +51,21 @@ def load_settings() -> Settings:
     if not source_chats:
         raise ValueError("SOURCE_CHATS must contain at least one chat reference")
 
+    target_chat_ref = _coerce_ref(target_chat.strip())
+
     return Settings(
         api_id=api_id,
         api_hash=api_hash,
         session_name=os.getenv("SESSION_NAME", "autoforwarder"),
         source_chats=source_chats,
-        target_chat=target_chat.strip(),
+        target_chat=target_chat_ref,
         skip_outgoing=_parse_bool(os.getenv("SKIP_OUTGOING"), default=True),
     )
 
 
-def _coerce_ref(chat_ref: str) -> str | int:
+def _coerce_ref(chat_ref: str | int) -> str | int:
+    if isinstance(chat_ref, int):
+        return chat_ref
     try:
         return int(chat_ref)
     except ValueError:
@@ -108,7 +112,7 @@ async def main() -> None:
     await client.start()
 
     source_entities = await _resolve_entities(client, settings.source_chats)
-    target_entity = await client.get_entity(_coerce_ref(settings.target_chat))
+    target_entity = await client.get_entity(settings.target_chat)
 
     source_peer_ids = {get_peer_id(entity) for entity in source_entities}
     target_peer_id = get_peer_id(target_entity)
