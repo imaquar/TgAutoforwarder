@@ -17,7 +17,11 @@ pip install -r requirements.txt
 
 ## Configuration
 1. Get your `API_ID` and `API_HASH` from https://my.telegram.org.
-2. Copy `.env.example` to `.env` and fill in the values.
+2. Copy `.env.example` to `.env`:
+   ```bash
+   cp .env.example .env
+   ```
+3. Fill in the values in `.env`.
 
 Example:
 ```env
