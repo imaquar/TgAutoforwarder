@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -21,6 +22,9 @@ class Settings:
     session_name: str
     source_chats: list[str]
     target_chat: str | int | None
+    delivery_mode: str
+    bot_token: str | None
+    bot_target_chat: str | int | None
     auth_mode: str
     skip_outgoing: bool
     allowed_senders: list[str]
@@ -37,6 +41,13 @@ def _parse_auth_mode(value: str | None) -> str:
     mode = (value or "phone").strip().lower()
     if mode not in {"phone", "qr"}:
         raise ValueError("AUTH_MODE must be either 'phone' or 'qr'")
+    return mode
+
+
+def _parse_delivery_mode(value: str | None) -> str:
+    mode = (value or "user").strip().lower()
+    if mode not in {"user", "bot"}:
+        raise ValueError("DELIVERY_MODE must be either 'user' or 'bot'")
     return mode
 
 
@@ -83,6 +94,9 @@ def load_settings(require_routing: bool = True) -> Settings:
     api_hash = os.getenv("API_HASH")
     source_chats_raw = os.getenv("SOURCE_CHATS", "")
     target_chat = os.getenv("TARGET_CHAT", "")
+    delivery_mode = _parse_delivery_mode(os.getenv("DELIVERY_MODE"))
+    bot_token = (os.getenv("BOT_TOKEN") or "").strip() or None
+    bot_target_chat_raw = (os.getenv("BOT_TARGET_CHAT") or "").strip()
 
     if not api_id_raw:
         raise ValueError("Environment variable API_ID is required")
@@ -96,6 +110,7 @@ def load_settings(require_routing: bool = True) -> Settings:
 
     source_chats: list[str] = []
     target_chat_ref: str | int | None = None
+    bot_target_chat_ref: str | int | None = None
     if require_routing:
         if not source_chats_raw.strip():
             raise ValueError("Environment variable SOURCE_CHATS is required")
@@ -107,6 +122,10 @@ def load_settings(require_routing: bool = True) -> Settings:
             raise ValueError("SOURCE_CHATS must contain at least one chat reference")
 
         target_chat_ref = _coerce_ref(target_chat.strip())
+        if delivery_mode == "bot":
+            if not bot_token:
+                raise ValueError("Environment variable BOT_TOKEN is required when DELIVERY_MODE=bot")
+            bot_target_chat_ref = _coerce_ref(bot_target_chat_raw) if bot_target_chat_raw else target_chat_ref
 
     return Settings(
         api_id=api_id,
@@ -114,6 +133,9 @@ def load_settings(require_routing: bool = True) -> Settings:
         session_name=os.getenv("SESSION_NAME", "autoforwarder"),
         source_chats=source_chats,
         target_chat=target_chat_ref,
+        delivery_mode=delivery_mode,
+        bot_token=bot_token,
+        bot_target_chat=bot_target_chat_ref,
         auth_mode=_parse_auth_mode(os.getenv("AUTH_MODE")),
         skip_outgoing=_parse_bool(os.getenv("SKIP_OUTGOING"), default=True),
         allowed_senders=_parse_refs_csv(os.getenv("ALLOWED_SENDERS")),
@@ -232,6 +254,37 @@ async def _resolve_chat_sender_filters(
     return resolved
 
 
+def _remove_file_if_exists(path: str | None) -> None:
+    if path and os.path.exists(path):
+        os.remove(path)
+
+
+async def _send_media_as_bot(
+    source_client: TelegramClient,
+    bot_client: TelegramClient,
+    bot_target_entity: Any,
+    message: types.Message,
+    caption: str,
+) -> None:
+    fd, temp_path = tempfile.mkstemp(prefix="tgfwd_", suffix=".bin")
+    os.close(fd)
+
+    downloaded_path: str | None = None
+    try:
+        downloaded = await source_client.download_media(message, file=temp_path)
+        if isinstance(downloaded, bytes):
+            await bot_client.send_file(bot_target_entity, file=downloaded, caption=caption, link_preview=False)
+            return
+        if not downloaded:
+            raise RuntimeError("Failed to download media for bot delivery")
+        downloaded_path = downloaded
+        await bot_client.send_file(bot_target_entity, file=downloaded_path, caption=caption, link_preview=False)
+    finally:
+        _remove_file_if_exists(temp_path)
+        if downloaded_path and downloaded_path != temp_path:
+            _remove_file_if_exists(downloaded_path)
+
+
 async def _authorize_client(client: TelegramClient, settings: Settings) -> None:
     if settings.auth_mode == "phone":
         await client.start()
@@ -279,12 +332,27 @@ async def main() -> None:
     source_entities = await _resolve_entities(client, settings.source_chats)
     target_entity = await client.get_entity(settings.target_chat)
 
+    bot_client: TelegramClient | None = None
+    bot_target_entity: Any | None = None
+    if settings.delivery_mode == "bot":
+        bot_client = TelegramClient(f"{settings.session_name}_bot_sender", settings.api_id, settings.api_hash)
+        await bot_client.start(bot_token=settings.bot_token)
+        bot_target_entity = await bot_client.get_entity(settings.bot_target_chat)
+
     source_peer_ids = {get_peer_id(entity) for entity in source_entities}
-    target_peer_id = get_peer_id(target_entity)
+    target_peer_id: int | None = None
+    try:
+        if settings.delivery_mode == "bot":
+            target_peer_id = get_peer_id(await client.get_entity(settings.bot_target_chat))
+        else:
+            target_peer_id = get_peer_id(target_entity)
+    except Exception:
+        logging.warning("Could not resolve delivery target in user account. Target loop protection may be limited.")
+
     global_allowed_sender_ids = await _resolve_allowed_sender_ids(client, settings.allowed_senders)
     chat_allowed_sender_ids = await _resolve_chat_sender_filters(client, settings.chat_allowed_senders)
 
-    if target_peer_id in source_peer_ids:
+    if target_peer_id is not None and target_peer_id in source_peer_ids:
         logging.warning("Target chat is also in SOURCE_CHATS. Messages from it will be ignored to avoid loops.")
     for chat_peer_id in chat_allowed_sender_ids:
         if chat_peer_id not in source_peer_ids:
@@ -295,7 +363,14 @@ async def main() -> None:
 
     me = await client.get_me()
     logging.info("Connected as %s", me.username or me.id)
-    logging.info("Target chat: %s", _entity_label(target_entity))
+    if settings.delivery_mode == "bot":
+        bot_me = await bot_client.get_me()
+        logging.info("Delivery mode: bot")
+        logging.info("Bot sender: %s", bot_me.username or bot_me.id)
+        logging.info("Target chat (bot): %s", _entity_label(bot_target_entity))
+    else:
+        logging.info("Delivery mode: user")
+        logging.info("Target chat: %s", _entity_label(target_entity))
     logging.info("Source chats: %s", ", ".join(_entity_label(entity) for entity in source_entities))
     if global_allowed_sender_ids:
         logging.info("Global sender filter enabled: %s sender(s)", len(global_allowed_sender_ids))
@@ -307,7 +382,7 @@ async def main() -> None:
         if settings.skip_outgoing and event.out:
             return
 
-        if event.chat_id == target_peer_id:
+        if target_peer_id is not None and event.chat_id == target_peer_id:
             return
 
         allowed_for_chat = chat_allowed_sender_ids.get(event.chat_id)
@@ -330,27 +405,47 @@ async def main() -> None:
         try:
             if message.media:
                 caption = f"{prefix} {original_text}".strip()
-                try:
-                    await client.send_file(
-                        target_entity,
-                        file=message.media,
-                        caption=caption,
-                        link_preview=False,
-                    )
-                except Exception:
-                    # Some media types may not allow captions.
-                    await client.send_message(target_entity, prefix, link_preview=False)
-                    await client.forward_messages(target_entity, message)
+                if settings.delivery_mode == "bot":
+                    try:
+                        await _send_media_as_bot(
+                            source_client=client,
+                            bot_client=bot_client,
+                            bot_target_entity=bot_target_entity,
+                            message=message,
+                            caption=caption,
+                        )
+                    except Exception:
+                        await bot_client.send_message(bot_target_entity, prefix, link_preview=False)
+                else:
+                    try:
+                        await client.send_file(
+                            target_entity,
+                            file=message.media,
+                            caption=caption,
+                            link_preview=False,
+                        )
+                    except Exception:
+                        # Some media types may not allow captions.
+                        await client.send_message(target_entity, prefix, link_preview=False)
+                        await client.forward_messages(target_entity, message)
             else:
                 if not original_text:
                     return
-                await client.send_message(
-                    target_entity,
-                    f"{prefix} {original_text}",
-                    link_preview=False,
-                )
+                if settings.delivery_mode == "bot":
+                    await bot_client.send_message(
+                        bot_target_entity,
+                        f"{prefix} {original_text}",
+                        link_preview=False,
+                    )
+                else:
+                    await client.send_message(
+                        target_entity,
+                        f"{prefix} {original_text}",
+                        link_preview=False,
+                    )
 
-            await client(functions.messages.MarkDialogUnreadRequest(peer=target_entity, unread=True))
+            if settings.delivery_mode == "user":
+                await client(functions.messages.MarkDialogUnreadRequest(peer=target_entity, unread=True))
             logging.info("Forwarded message from %s", source_title)
         except Exception as exc:
             logging.exception("Failed to forward message from %s: %s", source_title, exc)

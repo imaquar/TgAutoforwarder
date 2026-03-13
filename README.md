@@ -4,9 +4,9 @@ A Python + Telethon service for automatically forwarding messages from multiple 
 
 ## Features
 - Listens for new messages in `SOURCE_CHATS`.
-- Sends them to `TARGET_CHAT`.
+- Sends them to `TARGET_CHAT` either from your user account or from a bot.
 - Adds a `[Source Chat Name]` prefix to the beginning of message text/caption.
-- Marks the target dialog as unread after each forwarded message.
+- In `DELIVERY_MODE=user`, marks the target dialog as unread after each forwarded message.
 - Supports login by phone code or by QR (`AUTH_MODE=qr`).
 
 ## Installation
@@ -29,9 +29,12 @@ Example:
 API_ID=123456
 API_HASH=xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SESSION_NAME=autoforwarder
+DELIVERY_MODE=user
 AUTH_MODE=phone
 SOURCE_CHATS=@chat_one,@chat_two
 TARGET_CHAT=@my_target_chat
+BOT_TOKEN=
+BOT_TARGET_CHAT=
 SKIP_OUTGOING=true
 ALLOWED_SENDERS=
 CHAT_ALLOWED_SENDERS=
@@ -46,6 +49,14 @@ On first run in `AUTH_MODE=phone`, Telethon will ask for your phone number, logi
 
 For QR login, set `AUTH_MODE=qr`, run the script, and scan the terminal QR in Telegram: `Settings -> Devices -> Link Desktop Device`.
 
+To deliver messages via bot, set:
+```env
+DELIVERY_MODE=bot
+BOT_TOKEN=123456:your_bot_token
+# optional, falls back to TARGET_CHAT
+BOT_TARGET_CHAT=-1001234567890
+```
+
 To print available chats and IDs:
 ```bash
 python forwarder.py --list-chats
@@ -58,10 +69,12 @@ python forwarder.py --list-chats --list-limit 500
 ## Notes
 - `SOURCE_CHATS` supports `@username`, links, and numeric IDs.
 - `TARGET_CHAT` supports `@username`, links, and numeric IDs.
+- `DELIVERY_MODE=bot` requires `BOT_TOKEN`.
+- `BOT_TARGET_CHAT` is optional in bot mode; if empty, `TARGET_CHAT` is used.
 - `ALLOWED_SENDERS` is optional and applies one sender list to all `SOURCE_CHATS`.
 - `CHAT_ALLOWED_SENDERS` is optional JSON with per-chat sender lists and has priority over `ALLOWED_SENDERS`.
 - Sender filters accept usernames and numeric IDs.
-- For some media types where captions are not available, the service sends a separate prefix message and then forwards the original message.
+- For some media types where captions are not available, the service sends a separate prefix-only message as fallback.
 
 ## Sender Filter Examples
 Only selected senders from all source chats:
