@@ -1,6 +1,7 @@
 import asyncio
 import argparse
 from getpass import getpass
+import html
 import json
 import logging
 import mimetypes
@@ -276,6 +277,14 @@ def _safe_media_filename(message: types.Message) -> str:
     return f"media{file_ext or ''}"
 
 
+def _format_prefixed_html(source_title: str, text: str) -> str:
+    escaped_prefix = html.escape(f"[{source_title}]")
+    stripped_text = text.strip()
+    if stripped_text:
+        return f"<b>{escaped_prefix}</b>\n{html.escape(stripped_text)}"
+    return f"<b>{escaped_prefix}</b>"
+
+
 async def _send_media_as_bot(
     source_client: TelegramClient,
     bot_client: TelegramClient,
@@ -294,7 +303,13 @@ async def _send_media_as_bot(
                 out_file.write(downloaded)
             downloaded = file_hint
 
-        await bot_client.send_file(bot_target_entity, file=downloaded, caption=caption, link_preview=False)
+        await bot_client.send_file(
+            bot_target_entity,
+            file=downloaded,
+            caption=caption,
+            link_preview=False,
+            parse_mode="html",
+        )
 
 
 async def _authorize_client(client: TelegramClient, settings: Settings) -> None:
@@ -411,12 +426,13 @@ async def main() -> None:
 
         source = await event.get_chat()
         source_title = _entity_label(source)
-        prefix = f"[{source_title}]"
         original_text = (message.message or "").strip()
+        formatted_text = _format_prefixed_html(source_title, original_text)
+        formatted_prefix_only = _format_prefixed_html(source_title, "")
 
         try:
             if message.media:
-                caption = f"{prefix} {original_text}".strip()
+                caption = formatted_text
                 if settings.delivery_mode == "bot":
                     try:
                         await _send_media_as_bot(
@@ -427,7 +443,12 @@ async def main() -> None:
                             caption=caption,
                         )
                     except Exception:
-                        await bot_client.send_message(bot_target_entity, prefix, link_preview=False)
+                        await bot_client.send_message(
+                            bot_target_entity,
+                            formatted_prefix_only,
+                            link_preview=False,
+                            parse_mode="html",
+                        )
                 else:
                     try:
                         await client.send_file(
@@ -435,10 +456,16 @@ async def main() -> None:
                             file=message.media,
                             caption=caption,
                             link_preview=False,
+                            parse_mode="html",
                         )
                     except Exception:
                         # Some media types may not allow captions.
-                        await client.send_message(target_entity, prefix, link_preview=False)
+                        await client.send_message(
+                            target_entity,
+                            formatted_prefix_only,
+                            link_preview=False,
+                            parse_mode="html",
+                        )
                         await client.forward_messages(target_entity, message)
             else:
                 if not original_text:
@@ -446,14 +473,16 @@ async def main() -> None:
                 if settings.delivery_mode == "bot":
                     await bot_client.send_message(
                         bot_target_entity,
-                        f"{prefix} {original_text}",
+                        formatted_text,
                         link_preview=False,
+                        parse_mode="html",
                     )
                 else:
                     await client.send_message(
                         target_entity,
-                        f"{prefix} {original_text}",
+                        formatted_text,
                         link_preview=False,
+                        parse_mode="html",
                     )
 
             if settings.delivery_mode == "user":
