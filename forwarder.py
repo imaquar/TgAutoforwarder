@@ -3,6 +3,7 @@ import argparse
 from getpass import getpass
 import json
 import logging
+import mimetypes
 import os
 import sys
 import tempfile
@@ -254,9 +255,25 @@ async def _resolve_chat_sender_filters(
     return resolved
 
 
-def _remove_file_if_exists(path: str | None) -> None:
-    if path and os.path.exists(path):
-        os.remove(path)
+def _safe_media_filename(message: types.Message) -> str:
+    file_meta = getattr(message, "file", None)
+    file_name = getattr(file_meta, "name", None) if file_meta else None
+    file_ext = getattr(file_meta, "ext", None) if file_meta else None
+
+    if file_name:
+        base = os.path.basename(str(file_name).strip())
+        if base and base not in {".", ".."}:
+            return base
+
+    if not file_ext and file_meta:
+        mime_type = getattr(file_meta, "mime_type", None)
+        if mime_type:
+            file_ext = mimetypes.guess_extension(mime_type) or ""
+
+    if file_ext and not str(file_ext).startswith("."):
+        file_ext = f".{file_ext}"
+
+    return f"media{file_ext or ''}"
 
 
 async def _send_media_as_bot(
@@ -266,23 +283,18 @@ async def _send_media_as_bot(
     message: types.Message,
     caption: str,
 ) -> None:
-    fd, temp_path = tempfile.mkstemp(prefix="tgfwd_", suffix=".bin")
-    os.close(fd)
-
-    downloaded_path: str | None = None
-    try:
-        downloaded = await source_client.download_media(message, file=temp_path)
-        if isinstance(downloaded, bytes):
-            await bot_client.send_file(bot_target_entity, file=downloaded, caption=caption, link_preview=False)
-            return
+    with tempfile.TemporaryDirectory(prefix="tgfwd_") as temp_dir:
+        file_hint = os.path.join(temp_dir, _safe_media_filename(message))
+        downloaded = await source_client.download_media(message, file=file_hint)
         if not downloaded:
             raise RuntimeError("Failed to download media for bot delivery")
-        downloaded_path = downloaded
-        await bot_client.send_file(bot_target_entity, file=downloaded_path, caption=caption, link_preview=False)
-    finally:
-        _remove_file_if_exists(temp_path)
-        if downloaded_path and downloaded_path != temp_path:
-            _remove_file_if_exists(downloaded_path)
+
+        if isinstance(downloaded, bytes):
+            with open(file_hint, "wb") as out_file:
+                out_file.write(downloaded)
+            downloaded = file_hint
+
+        await bot_client.send_file(bot_target_entity, file=downloaded, caption=caption, link_preview=False)
 
 
 async def _authorize_client(client: TelegramClient, settings: Settings) -> None:
