@@ -281,7 +281,7 @@ def _format_prefixed_html(source_title: str, text: str) -> str:
     escaped_prefix = html.escape(f"[{source_title}]")
     stripped_text = text.strip()
     if stripped_text:
-        return f"<b>{escaped_prefix}</b>\n{html.escape(stripped_text)}"
+        return f"<b>{escaped_prefix}</b>\n\n{html.escape(stripped_text)}"
     return f"<b>{escaped_prefix}</b>"
 
 
