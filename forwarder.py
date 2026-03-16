@@ -8,6 +8,7 @@ import mimetypes
 import os
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -31,6 +32,91 @@ class Settings:
     skip_outgoing: bool
     allowed_senders: list[str]
     chat_allowed_senders: dict[str, list[str]]
+    message_map_file: str
+    message_map_ttl_days: int
+
+
+class MessageMapStore:
+    def __init__(self, path: str, ttl_days: int = 7) -> None:
+        self.path = path
+        self.ttl_seconds: int | None = ttl_days * 24 * 60 * 60 if ttl_days > 0 else None
+        self._lock = asyncio.Lock()
+        self._data: dict[str, dict[str, int]] = {}
+        self._load()
+
+    @staticmethod
+    def _key(source_chat_id: int, source_message_id: int) -> str:
+        return f"{source_chat_id}:{source_message_id}"
+
+    def _load(self) -> None:
+        if not os.path.exists(self.path):
+            return
+
+        try:
+            with open(self.path, "r", encoding="utf-8") as file_obj:
+                payload = json.load(file_obj)
+            if isinstance(payload, dict):
+                now = int(time.time())
+                normalized: dict[str, dict[str, int]] = {}
+                for key, value in payload.items():
+                    if isinstance(value, int):
+                        normalized[str(key)] = {
+                            "target_message_id": int(value),
+                            "updated_at": now,
+                        }
+                        continue
+
+                    if isinstance(value, dict):
+                        target_id = value.get("target_message_id")
+                        updated_at = value.get("updated_at", now)
+                        if isinstance(target_id, int):
+                            normalized[str(key)] = {
+                                "target_message_id": int(target_id),
+                                "updated_at": int(updated_at) if isinstance(updated_at, int) else now,
+                            }
+
+                self._data = normalized
+                self._prune_old_records_locked()
+                self._save()
+        except Exception as exc:
+            logging.warning("Failed to load message map file %s: %s", self.path, exc)
+            self._data = {}
+
+    def _save(self) -> None:
+        temp_path = f"{self.path}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as file_obj:
+            json.dump(self._data, file_obj)
+        os.replace(temp_path, self.path)
+
+    def _prune_old_records_locked(self) -> int:
+        if self.ttl_seconds is None:
+            return 0
+
+        cutoff = int(time.time()) - self.ttl_seconds
+        keys_to_remove = [
+            key
+            for key, value in self._data.items()
+            if int(value.get("updated_at", 0)) < cutoff
+        ]
+        for key in keys_to_remove:
+            self._data.pop(key, None)
+        return len(keys_to_remove)
+
+    async def get(self, source_chat_id: int, source_message_id: int) -> int | None:
+        async with self._lock:
+            value = self._data.get(self._key(source_chat_id, source_message_id))
+            if not value:
+                return None
+            return int(value["target_message_id"])
+
+    async def set(self, source_chat_id: int, source_message_id: int, target_message_id: int) -> None:
+        async with self._lock:
+            self._data[self._key(source_chat_id, source_message_id)] = {
+                "target_message_id": target_message_id,
+                "updated_at": int(time.time()),
+            }
+            self._prune_old_records_locked()
+            self._save()
 
 
 def _parse_bool(value: str | None, default: bool = True) -> bool:
@@ -55,6 +141,18 @@ def _parse_delivery_mode(value: str | None) -> str:
 
 def _parse_refs_csv(value: str | None) -> list[str]:
     return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+
+def _parse_non_negative_int(value: str | None, default: int) -> int:
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = int(value.strip())
+    except ValueError as exc:
+        raise ValueError("MESSAGE_MAP_TTL_DAYS must be a non-negative integer") from exc
+    if parsed < 0:
+        raise ValueError("MESSAGE_MAP_TTL_DAYS must be a non-negative integer")
+    return parsed
 
 
 def _parse_chat_allowed_senders(raw: str | None) -> dict[str, list[str]]:
@@ -110,6 +208,8 @@ def load_settings(require_routing: bool = True) -> Settings:
     except ValueError as exc:
         raise ValueError("API_ID must be an integer") from exc
 
+    session_name = os.getenv("SESSION_NAME", "autoforwarder")
+
     source_chats: list[str] = []
     target_chat_ref: str | int | None = None
     bot_target_chat_ref: str | int | None = None
@@ -132,7 +232,7 @@ def load_settings(require_routing: bool = True) -> Settings:
     return Settings(
         api_id=api_id,
         api_hash=api_hash,
-        session_name=os.getenv("SESSION_NAME", "autoforwarder"),
+        session_name=session_name,
         source_chats=source_chats,
         target_chat=target_chat_ref,
         delivery_mode=delivery_mode,
@@ -142,6 +242,8 @@ def load_settings(require_routing: bool = True) -> Settings:
         skip_outgoing=_parse_bool(os.getenv("SKIP_OUTGOING"), default=True),
         allowed_senders=_parse_refs_csv(os.getenv("ALLOWED_SENDERS")),
         chat_allowed_senders=_parse_chat_allowed_senders(os.getenv("CHAT_ALLOWED_SENDERS")),
+        message_map_file=os.getenv("MESSAGE_MAP_FILE", f"{session_name}_message_map.json"),
+        message_map_ttl_days=_parse_non_negative_int(os.getenv("MESSAGE_MAP_TTL_DAYS"), default=7),
     )
 
 
@@ -312,7 +414,7 @@ async def _send_media_as_bot(
     bot_target_entity: Any,
     message: types.Message,
     caption: str,
-) -> None:
+) -> Any:
     with tempfile.TemporaryDirectory(prefix="tgfwd_") as temp_dir:
         file_hint = os.path.join(temp_dir, _safe_media_filename(message))
         downloaded = await source_client.download_media(message, file=file_hint)
@@ -324,13 +426,28 @@ async def _send_media_as_bot(
                 out_file.write(downloaded)
             downloaded = file_hint
 
-        await bot_client.send_file(
+        return await bot_client.send_file(
             bot_target_entity,
             file=downloaded,
             caption=caption,
             link_preview=False,
             parse_mode="html",
         )
+
+
+def _extract_message_id(result: Any) -> int | None:
+    if result is None:
+        return None
+
+    if isinstance(result, list):
+        for item in result:
+            message_id = getattr(item, "id", None)
+            if isinstance(message_id, int):
+                return message_id
+        return None
+
+    message_id = getattr(result, "id", None)
+    return message_id if isinstance(message_id, int) else None
 
 
 async def _authorize_client(client: TelegramClient, settings: Settings) -> None:
@@ -382,10 +499,15 @@ async def main() -> None:
 
     bot_client: TelegramClient | None = None
     bot_target_entity: Any | None = None
+    message_map_store: MessageMapStore | None = None
     if settings.delivery_mode == "bot":
         bot_client = TelegramClient(f"{settings.session_name}_bot_sender", settings.api_id, settings.api_hash)
         await bot_client.start(bot_token=settings.bot_token)
         bot_target_entity = await bot_client.get_entity(settings.bot_target_chat)
+        message_map_store = MessageMapStore(
+            settings.message_map_file,
+            ttl_days=settings.message_map_ttl_days,
+        )
 
     source_peer_ids = {get_peer_id(entity) for entity in source_entities}
     target_peer_id: int | None = None
@@ -451,67 +573,129 @@ async def main() -> None:
         message_url = _build_message_url(source, message.id)
         formatted_text = _format_prefixed_html(source_title, original_text, message_url=message_url)
         formatted_prefix_only = _format_prefixed_html(source_title, "", message_url=message_url)
+        sent_target_message_id: int | None = None
 
         try:
             if message.media:
                 caption = formatted_text
                 if settings.delivery_mode == "bot":
                     try:
-                        await _send_media_as_bot(
+                        send_result = await _send_media_as_bot(
                             source_client=client,
                             bot_client=bot_client,
                             bot_target_entity=bot_target_entity,
                             message=message,
                             caption=caption,
                         )
+                        sent_target_message_id = _extract_message_id(send_result)
                     except Exception:
-                        await bot_client.send_message(
+                        sent_msg = await bot_client.send_message(
                             bot_target_entity,
                             formatted_prefix_only,
                             link_preview=False,
                             parse_mode="html",
                         )
+                        sent_target_message_id = _extract_message_id(sent_msg)
                 else:
                     try:
-                        await client.send_file(
+                        sent_msg = await client.send_file(
                             target_entity,
                             file=message.media,
                             caption=caption,
                             link_preview=False,
                             parse_mode="html",
                         )
+                        sent_target_message_id = _extract_message_id(sent_msg)
                     except Exception:
                         # Some media types may not allow captions.
-                        await client.send_message(
+                        sent_msg = await client.send_message(
                             target_entity,
                             formatted_prefix_only,
                             link_preview=False,
                             parse_mode="html",
                         )
+                        sent_target_message_id = _extract_message_id(sent_msg)
                         await client.forward_messages(target_entity, message)
             else:
                 if not original_text:
                     return
                 if settings.delivery_mode == "bot":
-                    await bot_client.send_message(
+                    sent_msg = await bot_client.send_message(
                         bot_target_entity,
                         formatted_text,
                         link_preview=False,
                         parse_mode="html",
                     )
+                    sent_target_message_id = _extract_message_id(sent_msg)
                 else:
-                    await client.send_message(
+                    sent_msg = await client.send_message(
                         target_entity,
                         formatted_text,
                         link_preview=False,
                         parse_mode="html",
                     )
+                    sent_target_message_id = _extract_message_id(sent_msg)
+
+            if (
+                settings.delivery_mode == "bot"
+                and message_map_store is not None
+                and sent_target_message_id is not None
+                and event.chat_id is not None
+            ):
+                await message_map_store.set(event.chat_id, message.id, sent_target_message_id)
 
             if settings.delivery_mode == "user":
                 await client(functions.messages.MarkDialogUnreadRequest(peer=target_entity, unread=True))
             logging.info("Forwarded message from %s", source_title)
         except Exception as exc:
             logging.exception("Failed to forward message from %s: %s", source_title, exc)
+
+    @client.on(events.MessageEdited(chats=source_entities))
+    async def edit_forwarded_message(event: events.MessageEdited.Event) -> None:
+        if settings.delivery_mode != "bot" or message_map_store is None:
+            return
+
+        if settings.skip_outgoing and event.out:
+            return
+
+        if target_peer_id is not None and event.chat_id == target_peer_id:
+            return
+
+        allowed_for_chat = chat_allowed_sender_ids.get(event.chat_id)
+        if allowed_for_chat is not None:
+            if event.sender_id is None or event.sender_id not in allowed_for_chat:
+                return
+        elif global_allowed_sender_ids:
+            if event.sender_id is None or event.sender_id not in global_allowed_sender_ids:
+                return
+
+        message = event.message
+        if message is None or message.action is not None or event.chat_id is None:
+            return
+
+        mapped_target_message_id = await message_map_store.get(event.chat_id, message.id)
+        if mapped_target_message_id is None:
+            return
+
+        source = await event.get_chat()
+        source_title = _entity_label(source)
+        original_text = (message.message or "").strip()
+        message_url = _build_message_url(source, message.id)
+        formatted_text = _format_prefixed_html(source_title, original_text, message_url=message_url)
+
+        try:
+            await bot_client.edit_message(
+                bot_target_entity,
+                mapped_target_message_id,
+                formatted_text,
+                link_preview=False,
+                parse_mode="html",
+            )
+            logging.info("Edited forwarded message from %s", source_title)
+        except errors.MessageNotModifiedError:
+            pass
+        except Exception as exc:
+            logging.exception("Failed to edit forwarded message from %s: %s", source_title, exc)
 
     logging.info("Forwarder is running. Press Ctrl+C to stop.")
     await client.run_until_disconnected()
