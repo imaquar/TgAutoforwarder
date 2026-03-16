@@ -32,7 +32,8 @@ class Settings:
     skip_outgoing: bool
     allowed_senders: list[str]
     chat_allowed_senders: dict[str, list[str]]
-    message_map_file: str
+    message_map_file_bot: str
+    message_map_file_user: str
     message_map_ttl_days: int
     pm_alerts_enabled: bool
     pm_alert_target_chat: str | int | None
@@ -270,6 +271,8 @@ def load_settings(require_routing: bool = True) -> Settings:
         raise ValueError("API_ID must be an integer") from exc
 
     session_name = os.getenv("SESSION_NAME", "autoforwarder")
+    default_message_map_file_bot = f"{session_name}_message_map_bot.json"
+    default_message_map_file_user = f"{session_name}_message_map_user.json"
 
     source_chats: list[str] = []
     target_chat_ref: str | int | None = None
@@ -310,7 +313,8 @@ def load_settings(require_routing: bool = True) -> Settings:
         skip_outgoing=_parse_bool(os.getenv("SKIP_OUTGOING"), default=True),
         allowed_senders=_parse_refs_csv(os.getenv("ALLOWED_SENDERS")),
         chat_allowed_senders=_parse_chat_allowed_senders(os.getenv("CHAT_ALLOWED_SENDERS")),
-        message_map_file=os.getenv("MESSAGE_MAP_FILE", f"{session_name}_message_map.json"),
+        message_map_file_bot=(os.getenv("MESSAGE_MAP_FILE_BOT") or "").strip() or default_message_map_file_bot,
+        message_map_file_user=(os.getenv("MESSAGE_MAP_FILE_USER") or "").strip() or default_message_map_file_user,
         message_map_ttl_days=_parse_non_negative_int(
             os.getenv("MESSAGE_MAP_TTL_DAYS"),
             default=7,
@@ -629,10 +633,15 @@ async def main() -> None:
         await bot_client.start(bot_token=settings.bot_token)
     if settings.delivery_mode == "bot":
         bot_target_entity = await bot_client.get_entity(settings.bot_target_chat)
-        message_map_store = MessageMapStore(
-            settings.message_map_file,
-            ttl_days=settings.message_map_ttl_days,
-        )
+    active_message_map_file = (
+        settings.message_map_file_bot
+        if settings.delivery_mode == "bot"
+        else settings.message_map_file_user
+    )
+    message_map_store = MessageMapStore(
+        active_message_map_file,
+        ttl_days=settings.message_map_ttl_days,
+    )
     if settings.pm_alerts_enabled:
         pm_alert_target_entity = await bot_client.get_entity(settings.pm_alert_target_chat)
         pm_alerts_store = PmAlertCooldownStore(settings.pm_alerts_file)
@@ -672,6 +681,7 @@ async def main() -> None:
     else:
         logging.info("Delivery mode: user")
         logging.info("Target chat: %s", _entity_label(target_entity))
+    logging.info("Message map file: %s", active_message_map_file)
     logging.info("Source chats: %s", ", ".join(_entity_label(entity) for entity in source_entities))
     if global_allowed_sender_ids:
         logging.info("Global sender filter enabled: %s sender(s)", len(global_allowed_sender_ids))
@@ -790,8 +800,7 @@ async def main() -> None:
                     sent_target_message_id = _extract_message_id(sent_msg)
 
             if (
-                settings.delivery_mode == "bot"
-                and message_map_store is not None
+                message_map_store is not None
                 and sent_target_message_id is not None
                 and event.chat_id is not None
             ):
@@ -898,8 +907,7 @@ async def main() -> None:
                             )
 
             if (
-                settings.delivery_mode == "bot"
-                and message_map_store is not None
+                message_map_store is not None
                 and event.chat_id is not None
                 and sent_target_ids
             ):
@@ -950,7 +958,7 @@ async def main() -> None:
 
     @client.on(events.MessageEdited(chats=source_entities))
     async def edit_forwarded_message(event: events.MessageEdited.Event) -> None:
-        if settings.delivery_mode != "bot" or message_map_store is None:
+        if message_map_store is None:
             return
 
         if not _passes_forward_filters(event.chat_id, event.sender_id, event.out):
@@ -971,13 +979,22 @@ async def main() -> None:
         formatted_text = _format_prefixed_html(source_title, original_text, message_url=message_url)
 
         try:
-            await bot_client.edit_message(
-                bot_target_entity,
-                mapped_target_message_id,
-                formatted_text,
-                link_preview=False,
-                parse_mode="html",
-            )
+            if settings.delivery_mode == "bot":
+                await bot_client.edit_message(
+                    bot_target_entity,
+                    mapped_target_message_id,
+                    formatted_text,
+                    link_preview=False,
+                    parse_mode="html",
+                )
+            else:
+                await client.edit_message(
+                    target_entity,
+                    mapped_target_message_id,
+                    formatted_text,
+                    link_preview=False,
+                    parse_mode="html",
+                )
             logging.info("Edited forwarded message from %s", source_title)
         except errors.MessageNotModifiedError:
             pass

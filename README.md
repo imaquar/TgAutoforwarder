@@ -8,7 +8,7 @@ A Python + Telethon service for automatically forwarding messages from multiple 
 - Adds a `[Source Chat Name]` prefix to the beginning of message text/caption.
 - Preserves grouped media (albums) as grouped messages in the target chat.
 - In `DELIVERY_MODE=user`, marks the target dialog as unread after each forwarded message.
-- In `DELIVERY_MODE=bot`, edits the forwarded message when the source message is edited.
+- Syncs edits: when a source message is edited, forwarded message text/caption is updated (`user` and `bot` modes).
 - Optional PM alerts: on a new private message from a user, bot sends `<Name> написал(-а) новое сообщение.` with per-sender cooldown.
 - Supports login by phone code or by QR (`AUTH_MODE=qr`).
 
@@ -38,7 +38,8 @@ SOURCE_CHATS=@chat_one,@chat_two
 TARGET_CHAT=@my_target_chat
 BOT_TOKEN=
 BOT_TARGET_CHAT=
-MESSAGE_MAP_FILE=autoforwarder_message_map.json
+MESSAGE_MAP_FILE_BOT=autoforwarder_message_map_bot.json
+MESSAGE_MAP_FILE_USER=autoforwarder_message_map_user.json
 MESSAGE_MAP_TTL_DAYS=7
 PM_ALERTS_ENABLED=false
 PM_ALERT_TARGET_CHAT=
@@ -92,7 +93,8 @@ python forwarder.py --list-chats --list-limit 500
 - `TARGET_CHAT` supports `@username`, links, and numeric IDs.
 - `DELIVERY_MODE=bot` requires `BOT_TOKEN`.
 - `BOT_TARGET_CHAT` is optional in bot mode; if empty, `TARGET_CHAT` is used.
-- `MESSAGE_MAP_FILE` stores source->target message IDs for edit syncing in bot mode.
+- `MESSAGE_MAP_FILE_BOT` stores source->target message IDs for edit syncing in `DELIVERY_MODE=bot`.
+- `MESSAGE_MAP_FILE_USER` stores source->target message IDs for edit syncing in `DELIVERY_MODE=user`.
 - `MESSAGE_MAP_TTL_DAYS` controls cleanup of old mapping records (`7` by default, `0` disables cleanup).
 - Edit syncing works for messages that were forwarded while this mapping file was being maintained.
 - `SKIP_OUTGOING=true` skips your own outgoing messages from `SOURCE_CHATS`; set it to `false` to forward your messages too.
