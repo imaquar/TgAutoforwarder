@@ -71,6 +71,7 @@ python forwarder.py --list-chats --list-limit 500
 - `TARGET_CHAT` supports `@username`, links, and numeric IDs.
 - `DELIVERY_MODE=bot` requires `BOT_TOKEN`.
 - `BOT_TARGET_CHAT` is optional in bot mode; if empty, `TARGET_CHAT` is used.
+- `SKIP_OUTGOING=true` skips your own outgoing messages from `SOURCE_CHATS`; set it to `false` to forward your messages too.
 - `ALLOWED_SENDERS` is optional and applies one sender list to all `SOURCE_CHATS`.
 - `CHAT_ALLOWED_SENDERS` is optional JSON with per-chat sender lists and has priority over `ALLOWED_SENDERS`.
 - Sender filters accept usernames and numeric IDs.
