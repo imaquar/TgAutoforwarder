@@ -8,7 +8,7 @@ A Python + Telethon service for automatically forwarding messages from multiple 
 - Adds a `[Source Chat Name]` prefix to the beginning of message text/caption.
 - In `DELIVERY_MODE=user`, marks the target dialog as unread after each forwarded message.
 - In `DELIVERY_MODE=bot`, edits the forwarded message when the source message is edited.
-- Optional PM alerts: on a new private message from a user, bot sends `<Name> написал новое сообщение.` with per-sender cooldown.
+- Optional PM alerts: on a new private message from a user, bot sends `<Name> написал(-а) новое сообщение.` with per-sender cooldown.
 - Supports login by phone code or by QR (`AUTH_MODE=qr`).
 
 ## Installation

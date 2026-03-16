@@ -761,7 +761,7 @@ async def main() -> None:
 
         sender = await event.get_sender()
         sender_label = _entity_label(sender)
-        alert_text = f"{sender_label} написал новое сообщение."
+        alert_text = f"{sender_label} написал(-а) новое сообщение."
 
         try:
             await bot_client.send_message(pm_alert_target_entity, alert_text, link_preview=False)
