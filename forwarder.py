@@ -38,6 +38,7 @@ class Settings:
     pm_alert_target_chat: str | int | None
     pm_alert_cooldown_minutes: int
     pm_alerts_file: str
+    pm_alerts_exclude_chats: list[str]
 
 
 class MessageMapStore:
@@ -323,6 +324,7 @@ def load_settings(require_routing: bool = True) -> Settings:
             var_name="PM_ALERT_COOLDOWN_MINUTES",
         ),
         pm_alerts_file=os.getenv("PM_ALERTS_FILE", f"{session_name}_pm_alerts.json"),
+        pm_alerts_exclude_chats=_parse_refs_csv(os.getenv("PM_ALERTS_EXCLUDE_CHATS")),
     )
 
 
@@ -621,6 +623,7 @@ async def main() -> None:
     message_map_store: MessageMapStore | None = None
     pm_alert_target_entity: Any | None = None
     pm_alerts_store: PmAlertCooldownStore | None = None
+    pm_alert_excluded_chat_ids: set[int] = set()
     if settings.delivery_mode == "bot" or settings.pm_alerts_enabled:
         bot_client = TelegramClient(f"{settings.session_name}_bot_sender", settings.api_id, settings.api_hash)
         await bot_client.start(bot_token=settings.bot_token)
@@ -633,6 +636,9 @@ async def main() -> None:
     if settings.pm_alerts_enabled:
         pm_alert_target_entity = await bot_client.get_entity(settings.pm_alert_target_chat)
         pm_alerts_store = PmAlertCooldownStore(settings.pm_alerts_file)
+        if settings.pm_alerts_exclude_chats:
+            excluded_entities = await _resolve_entities(client, settings.pm_alerts_exclude_chats)
+            pm_alert_excluded_chat_ids = {get_peer_id(entity) for entity in excluded_entities}
 
     source_peer_ids = {get_peer_id(entity) for entity in source_entities}
     target_peer_id: int | None = None
@@ -677,6 +683,11 @@ async def main() -> None:
             _entity_label(pm_alert_target_entity),
             settings.pm_alert_cooldown_minutes,
         )
+        if pm_alert_excluded_chat_ids:
+            logging.info(
+                "PM alerts exclusions enabled: %s chat(s)",
+                len(pm_alert_excluded_chat_ids),
+            )
 
     def _passes_forward_filters(chat_id: int | None, sender_id: int | None, is_out: bool) -> bool:
         if chat_id is None:
@@ -904,6 +915,16 @@ async def main() -> None:
         if not settings.pm_alerts_enabled or pm_alerts_store is None:
             return
         if not event.is_private or event.out:
+            return
+        if (
+            event.chat_id is not None
+            and event.chat_id in pm_alert_excluded_chat_ids
+        ):
+            return
+        if (
+            event.sender_id is not None
+            and event.sender_id in pm_alert_excluded_chat_ids
+        ):
             return
 
         message = event.message
