@@ -103,6 +103,7 @@ python forwarder.py --list-chats --list-limit 500
 
 ### Optional PM Alerts
 - `PM_ALERTS_ENABLED=true` enables this additional feature for incoming private messages only (not groups/channels).
+- `PM alerts` always require `BOT_TOKEN`, even if `DELIVERY_MODE=user`.
 - `PM_ALERT_TARGET_CHAT` is optional; if empty, alerts are sent to `BOT_TARGET_CHAT` (or `TARGET_CHAT`).
 - `PM_ALERT_COOLDOWN_MINUTES` limits alerts to one per sender per cooldown window.
 - `PM_ALERTS_FILE` persists PM alert cooldown state across restarts.
