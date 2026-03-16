@@ -277,12 +277,33 @@ def _safe_media_filename(message: types.Message) -> str:
     return f"media{file_ext or ''}"
 
 
-def _format_prefixed_html(source_title: str, text: str) -> str:
+def _build_message_url(chat_entity: Any, message_id: int) -> str | None:
+    if not isinstance(chat_entity, types.Channel):
+        return None
+
+    username = getattr(chat_entity, "username", None)
+    if username:
+        return f"https://t.me/{username}/{message_id}"
+
+    peer_id = get_peer_id(chat_entity)
+    abs_peer_id = str(abs(peer_id))
+    if abs_peer_id.startswith("100"):
+        internal_id = abs_peer_id[3:]
+        return f"https://t.me/c/{internal_id}/{message_id}"
+    return None
+
+
+def _format_prefixed_html(source_title: str, text: str, message_url: str | None = None) -> str:
     escaped_prefix = html.escape(f"[{source_title}]")
+    prefix_markup = f"<b>{escaped_prefix}</b>"
+    if message_url:
+        escaped_url = html.escape(message_url, quote=True)
+        prefix_markup = f'<a href="{escaped_url}">{prefix_markup}</a>'
+
     stripped_text = text.strip()
     if stripped_text:
-        return f"<b>{escaped_prefix}</b>\n\n{html.escape(stripped_text)}"
-    return f"<b>{escaped_prefix}</b>"
+        return f"{prefix_markup}\n\n{html.escape(stripped_text)}"
+    return prefix_markup
 
 
 async def _send_media_as_bot(
@@ -427,8 +448,9 @@ async def main() -> None:
         source = await event.get_chat()
         source_title = _entity_label(source)
         original_text = (message.message or "").strip()
-        formatted_text = _format_prefixed_html(source_title, original_text)
-        formatted_prefix_only = _format_prefixed_html(source_title, "")
+        message_url = _build_message_url(source, message.id)
+        formatted_text = _format_prefixed_html(source_title, original_text, message_url=message_url)
+        formatted_prefix_only = _format_prefixed_html(source_title, "", message_url=message_url)
 
         try:
             if message.media:
