@@ -3,6 +3,7 @@ __pycache__/
 *.session
 *.session-journal
 *_message_map.json
+*_pm_alerts.json
 .DS_Store
 .env
 .venv/

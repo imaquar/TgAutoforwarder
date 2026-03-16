@@ -34,6 +34,10 @@ class Settings:
     chat_allowed_senders: dict[str, list[str]]
     message_map_file: str
     message_map_ttl_days: int
+    pm_alerts_enabled: bool
+    pm_alert_target_chat: str | int | None
+    pm_alert_cooldown_minutes: int
+    pm_alerts_file: str
 
 
 class MessageMapStore:
@@ -119,6 +123,60 @@ class MessageMapStore:
             self._save()
 
 
+class PmAlertCooldownStore:
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._lock = asyncio.Lock()
+        self._data: dict[str, int] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not os.path.exists(self.path):
+            return
+
+        try:
+            with open(self.path, "r", encoding="utf-8") as file_obj:
+                payload = json.load(file_obj)
+            if isinstance(payload, dict):
+                self._data = {
+                    str(key): int(value)
+                    for key, value in payload.items()
+                    if isinstance(value, int)
+                }
+        except Exception as exc:
+            logging.warning("Failed to load PM alerts file %s: %s", self.path, exc)
+            self._data = {}
+
+    def _save(self) -> None:
+        temp_path = f"{self.path}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as file_obj:
+            json.dump(self._data, file_obj)
+        os.replace(temp_path, self.path)
+
+    def _prune_old_records_locked(self, cooldown_seconds: int) -> None:
+        min_ttl = 7 * 24 * 60 * 60
+        keep_for = max(cooldown_seconds * 2, min_ttl)
+        cutoff = int(time.time()) - keep_for
+
+        keys_to_remove = [key for key, ts in self._data.items() if ts < cutoff]
+        for key in keys_to_remove:
+            self._data.pop(key, None)
+
+    async def should_notify(self, sender_id: int, cooldown_seconds: int) -> bool:
+        async with self._lock:
+            now = int(time.time())
+            key = str(sender_id)
+            last_alert = self._data.get(key)
+
+            if cooldown_seconds > 0 and last_alert is not None and (now - last_alert) < cooldown_seconds:
+                return False
+
+            self._data[key] = now
+            self._prune_old_records_locked(cooldown_seconds)
+            self._save()
+            return True
+
+
 def _parse_bool(value: str | None, default: bool = True) -> bool:
     if value is None:
         return default
@@ -143,15 +201,15 @@ def _parse_refs_csv(value: str | None) -> list[str]:
     return [item.strip() for item in (value or "").split(",") if item.strip()]
 
 
-def _parse_non_negative_int(value: str | None, default: int) -> int:
+def _parse_non_negative_int(value: str | None, default: int, var_name: str) -> int:
     if value is None or not value.strip():
         return default
     try:
         parsed = int(value.strip())
     except ValueError as exc:
-        raise ValueError("MESSAGE_MAP_TTL_DAYS must be a non-negative integer") from exc
+        raise ValueError(f"{var_name} must be a non-negative integer") from exc
     if parsed < 0:
-        raise ValueError("MESSAGE_MAP_TTL_DAYS must be a non-negative integer")
+        raise ValueError(f"{var_name} must be a non-negative integer")
     return parsed
 
 
@@ -197,6 +255,8 @@ def load_settings(require_routing: bool = True) -> Settings:
     delivery_mode = _parse_delivery_mode(os.getenv("DELIVERY_MODE"))
     bot_token = (os.getenv("BOT_TOKEN") or "").strip() or None
     bot_target_chat_raw = (os.getenv("BOT_TARGET_CHAT") or "").strip()
+    pm_alerts_enabled = _parse_bool(os.getenv("PM_ALERTS_ENABLED"), default=False)
+    pm_alert_target_chat_raw = (os.getenv("PM_ALERT_TARGET_CHAT") or "").strip()
 
     if not api_id_raw:
         raise ValueError("Environment variable API_ID is required")
@@ -213,6 +273,7 @@ def load_settings(require_routing: bool = True) -> Settings:
     source_chats: list[str] = []
     target_chat_ref: str | int | None = None
     bot_target_chat_ref: str | int | None = None
+    pm_alert_target_chat_ref: str | int | None = None
     if require_routing:
         if not source_chats_raw.strip():
             raise ValueError("Environment variable SOURCE_CHATS is required")
@@ -224,10 +285,16 @@ def load_settings(require_routing: bool = True) -> Settings:
             raise ValueError("SOURCE_CHATS must contain at least one chat reference")
 
         target_chat_ref = _coerce_ref(target_chat.strip())
-        if delivery_mode == "bot":
+        if delivery_mode == "bot" or pm_alerts_enabled:
             if not bot_token:
-                raise ValueError("Environment variable BOT_TOKEN is required when DELIVERY_MODE=bot")
+                raise ValueError("Environment variable BOT_TOKEN is required when DELIVERY_MODE=bot or PM_ALERTS_ENABLED=true")
+        if delivery_mode == "bot":
             bot_target_chat_ref = _coerce_ref(bot_target_chat_raw) if bot_target_chat_raw else target_chat_ref
+        if pm_alerts_enabled:
+            default_pm_alert_target = bot_target_chat_ref or target_chat_ref
+            pm_alert_target_chat_ref = _coerce_ref(pm_alert_target_chat_raw) if pm_alert_target_chat_raw else default_pm_alert_target
+            if pm_alert_target_chat_ref is None:
+                raise ValueError("Could not resolve PM alerts target chat. Set PM_ALERT_TARGET_CHAT explicitly.")
 
     return Settings(
         api_id=api_id,
@@ -243,7 +310,19 @@ def load_settings(require_routing: bool = True) -> Settings:
         allowed_senders=_parse_refs_csv(os.getenv("ALLOWED_SENDERS")),
         chat_allowed_senders=_parse_chat_allowed_senders(os.getenv("CHAT_ALLOWED_SENDERS")),
         message_map_file=os.getenv("MESSAGE_MAP_FILE", f"{session_name}_message_map.json"),
-        message_map_ttl_days=_parse_non_negative_int(os.getenv("MESSAGE_MAP_TTL_DAYS"), default=7),
+        message_map_ttl_days=_parse_non_negative_int(
+            os.getenv("MESSAGE_MAP_TTL_DAYS"),
+            default=7,
+            var_name="MESSAGE_MAP_TTL_DAYS",
+        ),
+        pm_alerts_enabled=pm_alerts_enabled,
+        pm_alert_target_chat=pm_alert_target_chat_ref,
+        pm_alert_cooldown_minutes=_parse_non_negative_int(
+            os.getenv("PM_ALERT_COOLDOWN_MINUTES"),
+            default=60,
+            var_name="PM_ALERT_COOLDOWN_MINUTES",
+        ),
+        pm_alerts_file=os.getenv("PM_ALERTS_FILE", f"{session_name}_pm_alerts.json"),
     )
 
 
@@ -500,14 +579,20 @@ async def main() -> None:
     bot_client: TelegramClient | None = None
     bot_target_entity: Any | None = None
     message_map_store: MessageMapStore | None = None
-    if settings.delivery_mode == "bot":
+    pm_alert_target_entity: Any | None = None
+    pm_alerts_store: PmAlertCooldownStore | None = None
+    if settings.delivery_mode == "bot" or settings.pm_alerts_enabled:
         bot_client = TelegramClient(f"{settings.session_name}_bot_sender", settings.api_id, settings.api_hash)
         await bot_client.start(bot_token=settings.bot_token)
+    if settings.delivery_mode == "bot":
         bot_target_entity = await bot_client.get_entity(settings.bot_target_chat)
         message_map_store = MessageMapStore(
             settings.message_map_file,
             ttl_days=settings.message_map_ttl_days,
         )
+    if settings.pm_alerts_enabled:
+        pm_alert_target_entity = await bot_client.get_entity(settings.pm_alert_target_chat)
+        pm_alerts_store = PmAlertCooldownStore(settings.pm_alerts_file)
 
     source_peer_ids = {get_peer_id(entity) for entity in source_entities}
     target_peer_id: int | None = None
@@ -546,6 +631,12 @@ async def main() -> None:
         logging.info("Global sender filter enabled: %s sender(s)", len(global_allowed_sender_ids))
     if chat_allowed_sender_ids:
         logging.info("Per-chat sender filter enabled for %s chat(s)", len(chat_allowed_sender_ids))
+    if settings.pm_alerts_enabled:
+        logging.info(
+            "PM alerts enabled: target=%s, cooldown=%s minute(s)",
+            _entity_label(pm_alert_target_entity),
+            settings.pm_alert_cooldown_minutes,
+        )
 
     @client.on(events.NewMessage(chats=source_entities))
     async def forward_message(event: events.NewMessage.Event) -> None:
@@ -649,6 +740,34 @@ async def main() -> None:
             logging.info("Forwarded message from %s", source_title)
         except Exception as exc:
             logging.exception("Failed to forward message from %s: %s", source_title, exc)
+
+    @client.on(events.NewMessage(incoming=True))
+    async def pm_alerts_handler(event: events.NewMessage.Event) -> None:
+        if not settings.pm_alerts_enabled or pm_alerts_store is None:
+            return
+        if not event.is_private or event.out:
+            return
+
+        message = event.message
+        if message is None or message.action is not None:
+            return
+        if event.sender_id is None:
+            return
+
+        cooldown_seconds = settings.pm_alert_cooldown_minutes * 60
+        should_notify = await pm_alerts_store.should_notify(event.sender_id, cooldown_seconds)
+        if not should_notify:
+            return
+
+        sender = await event.get_sender()
+        sender_label = _entity_label(sender)
+        alert_text = f"{sender_label} написал новое сообщение."
+
+        try:
+            await bot_client.send_message(pm_alert_target_entity, alert_text, link_preview=False)
+            logging.info("Sent PM alert for %s", sender_label)
+        except Exception as exc:
+            logging.exception("Failed to send PM alert for %s: %s", sender_label, exc)
 
     @client.on(events.MessageEdited(chats=source_entities))
     async def edit_forwarded_message(event: events.MessageEdited.Event) -> None:

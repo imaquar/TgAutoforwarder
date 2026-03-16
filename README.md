@@ -8,6 +8,7 @@ A Python + Telethon service for automatically forwarding messages from multiple 
 - Adds a `[Source Chat Name]` prefix to the beginning of message text/caption.
 - In `DELIVERY_MODE=user`, marks the target dialog as unread after each forwarded message.
 - In `DELIVERY_MODE=bot`, edits the forwarded message when the source message is edited.
+- Optional PM alerts: on a new private message from a user, bot sends `<Name> написал новое сообщение.` with per-sender cooldown.
 - Supports login by phone code or by QR (`AUTH_MODE=qr`).
 
 ## Installation
@@ -38,6 +39,10 @@ BOT_TOKEN=
 BOT_TARGET_CHAT=
 MESSAGE_MAP_FILE=autoforwarder_message_map.json
 MESSAGE_MAP_TTL_DAYS=7
+PM_ALERTS_ENABLED=false
+PM_ALERT_TARGET_CHAT=
+PM_ALERT_COOLDOWN_MINUTES=60
+PM_ALERTS_FILE=autoforwarder_pm_alerts.json
 SKIP_OUTGOING=true
 ALLOWED_SENDERS=
 CHAT_ALLOWED_SENDERS=
@@ -58,6 +63,15 @@ DELIVERY_MODE=bot
 BOT_TOKEN=123456:your_bot_token
 # optional, falls back to TARGET_CHAT
 BOT_TARGET_CHAT=-1001234567890
+```
+
+To enable PM alerts:
+```env
+PM_ALERTS_ENABLED=true
+# optional, defaults to BOT_TARGET_CHAT or TARGET_CHAT
+PM_ALERT_TARGET_CHAT=-1001234567890
+PM_ALERT_COOLDOWN_MINUTES=60
+PM_ALERTS_FILE=autoforwarder_pm_alerts.json
 ```
 
 To print available chats and IDs:
@@ -82,6 +96,12 @@ python forwarder.py --list-chats --list-limit 500
 - `CHAT_ALLOWED_SENDERS` is optional JSON with per-chat sender lists and has priority over `ALLOWED_SENDERS`.
 - Sender filters accept usernames and numeric IDs.
 - For some media types where captions are not available, the service sends a separate prefix-only message as fallback.
+
+### Optional PM Alerts
+- `PM_ALERTS_ENABLED=true` enables this additional feature for incoming private messages only (not groups/channels).
+- `PM_ALERT_TARGET_CHAT` is optional; if empty, alerts are sent to `BOT_TARGET_CHAT` (or `TARGET_CHAT`).
+- `PM_ALERT_COOLDOWN_MINUTES` limits alerts to one per sender per cooldown window.
+- `PM_ALERTS_FILE` persists PM alert cooldown state across restarts.
 
 ## Sender Filter Examples
 Only selected senders from all source chats:
