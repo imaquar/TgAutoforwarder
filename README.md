@@ -56,6 +56,13 @@ CHAT_ALLOWED_SENDERS=
 python forwarder.py
 ```
 
+Before running, set message map settings in `.env`:
+```env
+MESSAGE_MAP_FILE_BOT=autoforwarder_message_map_bot.json
+MESSAGE_MAP_FILE_USER=autoforwarder_message_map_user.json
+MESSAGE_MAP_TTL_DAYS=7
+```
+
 On first run in `AUTH_MODE=phone`, Telethon will ask for your phone number, login code, and 2FA password (if enabled).
 
 For QR login, set `AUTH_MODE=qr`, run the script, and scan the terminal QR in Telegram: `Settings -> Devices -> Link Desktop Device`.
