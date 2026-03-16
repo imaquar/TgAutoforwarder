@@ -6,6 +6,7 @@ A Python + Telethon service for automatically forwarding messages from multiple 
 - Listens for new messages in `SOURCE_CHATS`.
 - Sends them to `TARGET_CHAT` either from your user account or from a bot.
 - Adds a `[Source Chat Name]` prefix to the beginning of message text/caption.
+- Preserves grouped media (albums) as grouped messages in the target chat.
 - In `DELIVERY_MODE=user`, marks the target dialog as unread after each forwarded message.
 - In `DELIVERY_MODE=bot`, edits the forwarded message when the source message is edited.
 - Optional PM alerts: on a new private message from a user, bot sends `<Name> написал(-а) новое сообщение.` with per-sender cooldown.

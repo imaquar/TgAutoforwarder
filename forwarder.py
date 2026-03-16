@@ -496,14 +496,7 @@ async def _send_media_as_bot(
 ) -> Any:
     with tempfile.TemporaryDirectory(prefix="tgfwd_") as temp_dir:
         file_hint = os.path.join(temp_dir, _safe_media_filename(message))
-        downloaded = await source_client.download_media(message, file=file_hint)
-        if not downloaded:
-            raise RuntimeError("Failed to download media for bot delivery")
-
-        if isinstance(downloaded, bytes):
-            with open(file_hint, "wb") as out_file:
-                out_file.write(downloaded)
-            downloaded = file_hint
+        downloaded = await _download_media_to_path(source_client, message, file_hint)
 
         return await bot_client.send_file(
             bot_target_entity,
@@ -515,18 +508,65 @@ async def _send_media_as_bot(
 
 
 def _extract_message_id(result: Any) -> int | None:
+    message_ids = _extract_message_ids(result)
+    return message_ids[0] if message_ids else None
+
+
+def _extract_message_ids(result: Any) -> list[int]:
     if result is None:
-        return None
+        return []
 
     if isinstance(result, list):
+        ids: list[int] = []
         for item in result:
             message_id = getattr(item, "id", None)
             if isinstance(message_id, int):
-                return message_id
-        return None
+                ids.append(message_id)
+        return ids
 
     message_id = getattr(result, "id", None)
-    return message_id if isinstance(message_id, int) else None
+    return [message_id] if isinstance(message_id, int) else []
+
+
+async def _download_media_to_path(
+    source_client: TelegramClient,
+    message: types.Message,
+    file_path: str,
+) -> str:
+    downloaded = await source_client.download_media(message, file=file_path)
+    if not downloaded:
+        raise RuntimeError("Failed to download media")
+
+    if isinstance(downloaded, bytes):
+        with open(file_path, "wb") as out_file:
+            out_file.write(downloaded)
+        return file_path
+
+    return str(downloaded)
+
+
+async def _send_album_as_bot(
+    source_client: TelegramClient,
+    bot_client: TelegramClient,
+    bot_target_entity: Any,
+    messages: list[types.Message],
+    captions: list[str],
+) -> Any:
+    with tempfile.TemporaryDirectory(prefix="tgfwd_album_") as temp_dir:
+        files: list[str] = []
+        for idx, message in enumerate(messages):
+            safe_name = _safe_media_filename(message)
+            file_hint = os.path.join(temp_dir, f"{idx:02d}_{safe_name}")
+            downloaded = await _download_media_to_path(source_client, message, file_hint)
+            files.append(downloaded)
+
+        return await bot_client.send_file(
+            bot_target_entity,
+            file=files,
+            caption=captions,
+            link_preview=False,
+            parse_mode="html",
+        )
 
 
 async def _authorize_client(client: TelegramClient, settings: Settings) -> None:
@@ -638,24 +678,35 @@ async def main() -> None:
             settings.pm_alert_cooldown_minutes,
         )
 
+    def _passes_forward_filters(chat_id: int | None, sender_id: int | None, is_out: bool) -> bool:
+        if chat_id is None:
+            return False
+
+        if settings.skip_outgoing and is_out:
+            return False
+
+        if target_peer_id is not None and chat_id == target_peer_id:
+            return False
+
+        allowed_for_chat = chat_allowed_sender_ids.get(chat_id)
+        if allowed_for_chat is not None:
+            return sender_id is not None and sender_id in allowed_for_chat
+
+        if global_allowed_sender_ids:
+            return sender_id is not None and sender_id in global_allowed_sender_ids
+
+        return True
+
     @client.on(events.NewMessage(chats=source_entities))
     async def forward_message(event: events.NewMessage.Event) -> None:
-        if settings.skip_outgoing and event.out:
+        if not _passes_forward_filters(event.chat_id, event.sender_id, event.out):
             return
-
-        if target_peer_id is not None and event.chat_id == target_peer_id:
-            return
-
-        allowed_for_chat = chat_allowed_sender_ids.get(event.chat_id)
-        if allowed_for_chat is not None:
-            if event.sender_id is None or event.sender_id not in allowed_for_chat:
-                return
-        elif global_allowed_sender_ids:
-            if event.sender_id is None or event.sender_id not in global_allowed_sender_ids:
-                return
 
         message = event.message
         if message is None or message.action is not None:
+            return
+        if message.grouped_id is not None:
+            # Album messages are handled by events.Album to preserve grouping.
             return
 
         source = await event.get_chat()
@@ -741,6 +792,113 @@ async def main() -> None:
         except Exception as exc:
             logging.exception("Failed to forward message from %s: %s", source_title, exc)
 
+    @client.on(events.Album(chats=source_entities))
+    async def forward_album(event: events.Album.Event) -> None:
+        if not _passes_forward_filters(event.chat_id, event.sender_id, event.out):
+            return
+
+        album_messages = [
+            message
+            for message in event.messages
+            if message is not None and message.media and message.action is None
+        ]
+        if not album_messages:
+            return
+
+        source = await event.get_chat()
+        source_title = _entity_label(source)
+        first_message_url = _build_message_url(source, album_messages[0].id)
+
+        captions: list[str] = []
+        for idx, message in enumerate(album_messages):
+            text = (message.message or "").strip()
+            if idx == 0:
+                captions.append(_format_prefixed_html(source_title, text, message_url=first_message_url))
+            else:
+                captions.append(html.escape(text) if text else "")
+
+        sent_target_ids: list[int] = []
+        try:
+            if settings.delivery_mode == "bot":
+                try:
+                    send_result = await _send_album_as_bot(
+                        source_client=client,
+                        bot_client=bot_client,
+                        bot_target_entity=bot_target_entity,
+                        messages=album_messages,
+                        captions=captions,
+                    )
+                    sent_target_ids = _extract_message_ids(send_result)
+                except Exception:
+                    logging.exception(
+                        "Failed to send album as grouped media from %s; falling back to separate messages.",
+                        source_title,
+                    )
+                    for idx, message in enumerate(album_messages):
+                        try:
+                            send_result = await _send_media_as_bot(
+                                source_client=client,
+                                bot_client=bot_client,
+                                bot_target_entity=bot_target_entity,
+                                message=message,
+                                caption=captions[idx],
+                            )
+                            sent_message_id = _extract_message_id(send_result)
+                            if sent_message_id is not None:
+                                sent_target_ids.append(sent_message_id)
+                        except Exception:
+                            logging.exception(
+                                "Failed to send album item %s from %s",
+                                idx + 1,
+                                source_title,
+                            )
+            else:
+                try:
+                    send_result = await client.send_file(
+                        target_entity,
+                        file=[message.media for message in album_messages],
+                        caption=captions,
+                        link_preview=False,
+                        parse_mode="html",
+                    )
+                    sent_target_ids = _extract_message_ids(send_result)
+                except Exception:
+                    logging.exception(
+                        "Failed to send album as grouped media from %s; falling back to separate messages.",
+                        source_title,
+                    )
+                    for idx, message in enumerate(album_messages):
+                        try:
+                            send_result = await client.send_file(
+                                target_entity,
+                                file=message.media,
+                                caption=captions[idx],
+                                link_preview=False,
+                                parse_mode="html",
+                            )
+                            sent_message_id = _extract_message_id(send_result)
+                            if sent_message_id is not None:
+                                sent_target_ids.append(sent_message_id)
+                        except Exception:
+                            logging.exception(
+                                "Failed to send album item %s from %s",
+                                idx + 1,
+                                source_title,
+                            )
+
+            if (
+                settings.delivery_mode == "bot"
+                and message_map_store is not None
+                and event.chat_id is not None
+                and sent_target_ids
+            ):
+                for source_message, target_message_id in zip(album_messages, sent_target_ids):
+                    await message_map_store.set(event.chat_id, source_message.id, target_message_id)
+
+            logging.info("Forwarded album from %s", source_title)
+        except Exception as exc:
+            logging.exception("Failed to forward album from %s: %s", source_title, exc)
+
     @client.on(events.NewMessage(incoming=True))
     async def pm_alerts_handler(event: events.NewMessage.Event) -> None:
         if not settings.pm_alerts_enabled or pm_alerts_store is None:
@@ -774,19 +932,8 @@ async def main() -> None:
         if settings.delivery_mode != "bot" or message_map_store is None:
             return
 
-        if settings.skip_outgoing and event.out:
+        if not _passes_forward_filters(event.chat_id, event.sender_id, event.out):
             return
-
-        if target_peer_id is not None and event.chat_id == target_peer_id:
-            return
-
-        allowed_for_chat = chat_allowed_sender_ids.get(event.chat_id)
-        if allowed_for_chat is not None:
-            if event.sender_id is None or event.sender_id not in allowed_for_chat:
-                return
-        elif global_allowed_sender_ids:
-            if event.sender_id is None or event.sender_id not in global_allowed_sender_ids:
-                return
 
         message = event.message
         if message is None or message.action is not None or event.chat_id is None:
