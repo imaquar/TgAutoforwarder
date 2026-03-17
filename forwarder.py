@@ -1,5 +1,7 @@
 import asyncio
 import argparse
+from contextlib import suppress
+from datetime import datetime, timedelta
 from getpass import getpass
 import html
 import json
@@ -42,6 +44,11 @@ class Settings:
     pm_alerts_lang: str
     pm_alerts_file: str
     pm_alerts_exclude_chats: list[str]
+    pm_alerts_auto_delete_enabled: bool
+    pm_alerts_auto_delete_hour: int
+    pm_alerts_auto_delete_minute: int
+    pm_alerts_auto_delete_after_hours: int
+    pm_alerts_auto_delete_file: str
 
 
 class MessageMapStore:
@@ -181,6 +188,93 @@ class PmAlertCooldownStore:
             return True
 
 
+class PmAlertMessagesStore:
+    def __init__(self, path: str, keep_days: int = 7) -> None:
+        self.path = path
+        self.keep_seconds = keep_days * 24 * 60 * 60
+        self._lock = asyncio.Lock()
+        self._data: dict[str, dict[str, int]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not os.path.exists(self.path):
+            return
+
+        try:
+            with open(self.path, "r", encoding="utf-8") as file_obj:
+                payload = json.load(file_obj)
+            if isinstance(payload, dict):
+                normalized: dict[str, dict[str, int]] = {}
+                for chat_id, bucket in payload.items():
+                    if not isinstance(bucket, dict):
+                        continue
+                    normalized_bucket: dict[str, int] = {
+                        str(message_id): int(sent_ts)
+                        for message_id, sent_ts in bucket.items()
+                        if isinstance(sent_ts, int)
+                    }
+                    if normalized_bucket:
+                        normalized[str(chat_id)] = normalized_bucket
+                self._data = normalized
+                self._prune_old_records_locked()
+                self._save()
+        except Exception as exc:
+            logging.warning("Failed to load PM alerts messages file %s: %s", self.path, exc)
+            self._data = {}
+
+    def _save(self) -> None:
+        temp_path = f"{self.path}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as file_obj:
+            json.dump(self._data, file_obj)
+        os.replace(temp_path, self.path)
+
+    def _prune_old_records_locked(self) -> None:
+        cutoff = int(time.time()) - self.keep_seconds
+        empty_chat_ids: list[str] = []
+        for chat_id, bucket in self._data.items():
+            expired_message_ids = [message_id for message_id, sent_ts in bucket.items() if sent_ts < cutoff]
+            for message_id in expired_message_ids:
+                bucket.pop(message_id, None)
+            if not bucket:
+                empty_chat_ids.append(chat_id)
+        for chat_id in empty_chat_ids:
+            self._data.pop(chat_id, None)
+
+    async def add(self, chat_id: int, message_id: int) -> None:
+        async with self._lock:
+            chat_key = str(chat_id)
+            bucket = self._data.setdefault(chat_key, {})
+            bucket[str(message_id)] = int(time.time())
+            self._prune_old_records_locked()
+            self._save()
+
+    async def get_expired_ids(self, chat_id: int, cutoff_ts: int, limit: int = 5000) -> list[int]:
+        async with self._lock:
+            bucket = self._data.get(str(chat_id), {})
+            expired = [
+                int(message_id)
+                for message_id, sent_ts in bucket.items()
+                if sent_ts <= cutoff_ts
+            ]
+            expired.sort()
+            return expired[:limit]
+
+    async def remove_many(self, chat_id: int, message_ids: list[int]) -> None:
+        if not message_ids:
+            return
+        async with self._lock:
+            chat_key = str(chat_id)
+            bucket = self._data.get(chat_key)
+            if not bucket:
+                return
+            for message_id in message_ids:
+                bucket.pop(str(message_id), None)
+            if not bucket:
+                self._data.pop(chat_key, None)
+            self._prune_old_records_locked()
+            self._save()
+
+
 def _parse_bool(value: str | None, default: bool = True) -> bool:
     if value is None:
         return default
@@ -230,6 +324,21 @@ def _parse_non_negative_int(value: str | None, default: int, var_name: str) -> i
     return parsed
 
 
+def _parse_time_of_day(value: str | None, var_name: str, default: str = "05:00") -> tuple[int, int]:
+    raw = (value or default).strip()
+    parts = raw.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"{var_name} must be in HH:MM format")
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError as exc:
+        raise ValueError(f"{var_name} must be in HH:MM format") from exc
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError(f"{var_name} must be in HH:MM format")
+    return hour, minute
+
+
 def _parse_chat_allowed_senders(raw: str | None) -> dict[str, list[str]]:
     if not raw or not raw.strip():
         return {}
@@ -275,6 +384,7 @@ def load_settings(require_routing: bool = True) -> Settings:
     bot_target_chat_raw = (os.getenv("BOT_TARGET_CHAT") or "").strip()
     pm_alerts_enabled = _parse_bool(os.getenv("PM_ALERTS_ENABLED"), default=False)
     pm_alert_target_chat_raw = (os.getenv("PM_ALERT_TARGET_CHAT") or "").strip()
+    pm_alerts_auto_delete_enabled = _parse_bool(os.getenv("PM_ALERTS_AUTO_DELETE_ENABLED"), default=False)
 
     if not api_id_raw:
         raise ValueError("Environment variable API_ID is required")
@@ -289,6 +399,16 @@ def load_settings(require_routing: bool = True) -> Settings:
     session_name = os.getenv("SESSION_NAME", "autoforwarder")
     default_message_map_file_bot = f"{session_name}_message_map_bot.json"
     default_message_map_file_user = f"{session_name}_message_map_user.json"
+    pm_alerts_auto_delete_hour, pm_alerts_auto_delete_minute = _parse_time_of_day(
+        os.getenv("PM_ALERTS_AUTO_DELETE_TIME"),
+        var_name="PM_ALERTS_AUTO_DELETE_TIME",
+        default="05:00",
+    )
+    pm_alerts_auto_delete_after_hours = _parse_non_negative_int(
+        os.getenv("PM_ALERTS_AUTO_DELETE_AFTER_HOURS"),
+        default=24,
+        var_name="PM_ALERTS_AUTO_DELETE_AFTER_HOURS",
+    )
 
     source_chats: list[str] = [item.strip() for item in source_chats_raw.split(",") if item.strip()]
     target_chat_ref: str | int | None = _coerce_ref(target_chat.strip()) if target_chat.strip() else None
@@ -302,6 +422,14 @@ def load_settings(require_routing: bool = True) -> Settings:
 
     if require_routing and not forwarding_enabled and not pm_alerts_enabled:
         raise ValueError("Nothing to run: set FORWARDING_ENABLED=true or PM_ALERTS_ENABLED=true")
+
+    if pm_alerts_auto_delete_enabled and not pm_alerts_enabled:
+        raise ValueError("PM_ALERTS_AUTO_DELETE_ENABLED=true requires PM_ALERTS_ENABLED=true")
+
+    if pm_alerts_auto_delete_after_hours > 48:
+        raise ValueError("PM_ALERTS_AUTO_DELETE_AFTER_HOURS cannot be greater than 48")
+    if pm_alerts_auto_delete_enabled and pm_alerts_auto_delete_after_hours < 1:
+        raise ValueError("PM_ALERTS_AUTO_DELETE_AFTER_HOURS must be at least 1 when PM alerts auto-delete is enabled")
 
     if (forwarding_enabled and delivery_mode == "bot") or pm_alerts_enabled:
         if not bot_token:
@@ -347,6 +475,11 @@ def load_settings(require_routing: bool = True) -> Settings:
         pm_alerts_lang=_parse_pm_alerts_lang(os.getenv("PM_ALERTS_LANG")),
         pm_alerts_file=os.getenv("PM_ALERTS_FILE", f"{session_name}_pm_alerts.json"),
         pm_alerts_exclude_chats=_parse_refs_csv(os.getenv("PM_ALERTS_EXCLUDE_CHATS")),
+        pm_alerts_auto_delete_enabled=pm_alerts_auto_delete_enabled,
+        pm_alerts_auto_delete_hour=pm_alerts_auto_delete_hour,
+        pm_alerts_auto_delete_minute=pm_alerts_auto_delete_minute,
+        pm_alerts_auto_delete_after_hours=pm_alerts_auto_delete_after_hours,
+        pm_alerts_auto_delete_file=os.getenv("PM_ALERTS_AUTO_DELETE_FILE", f"{session_name}_pm_alerts_messages.json"),
     )
 
 
@@ -621,6 +754,56 @@ async def _authorize_client(client: TelegramClient, settings: Settings) -> None:
             break
 
 
+def _chunked(items: list[int], chunk_size: int) -> Iterable[list[int]]:
+    for idx in range(0, len(items), chunk_size):
+        yield items[idx: idx + chunk_size]
+
+
+async def _pm_alerts_auto_delete_loop(
+    *,
+    bot_client: TelegramClient,
+    pm_alert_target_entity: Any,
+    pm_alert_target_peer_id: int,
+    pm_alert_messages_store: PmAlertMessagesStore,
+    delete_hour: int,
+    delete_minute: int,
+    delete_after_hours: int,
+) -> None:
+    delete_after_seconds = delete_after_hours * 60 * 60
+    logging.info(
+        "PM alerts auto-delete enabled: daily at %02d:%02d, max age=%dh",
+        delete_hour,
+        delete_minute,
+        delete_after_hours,
+    )
+
+    while True:
+        now = datetime.now()
+        next_run = now.replace(hour=delete_hour, minute=delete_minute, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+
+        sleep_seconds = max(1.0, (next_run - now).total_seconds())
+        await asyncio.sleep(sleep_seconds)
+
+        cutoff_ts = int(time.time()) - delete_after_seconds
+        message_ids = await pm_alert_messages_store.get_expired_ids(pm_alert_target_peer_id, cutoff_ts)
+        if not message_ids:
+            logging.info("PM alerts auto-delete: no messages to delete")
+            continue
+
+        deleted_count = 0
+        for batch in _chunked(message_ids, 100):
+            try:
+                await bot_client.delete_messages(pm_alert_target_entity, batch)
+                await pm_alert_messages_store.remove_many(pm_alert_target_peer_id, batch)
+                deleted_count += len(batch)
+            except Exception as exc:
+                logging.exception("PM alerts auto-delete failed for a batch: %s", exc)
+
+        logging.info("PM alerts auto-delete: deleted %s message(s)", deleted_count)
+
+
 async def main() -> None:
     args = _parse_args()
     settings = load_settings(require_routing=not args.list_chats)
@@ -648,7 +831,10 @@ async def main() -> None:
     message_map_store: MessageMapStore | None = None
     active_message_map_file: str | None = None
     pm_alert_target_entity: Any | None = None
+    pm_alert_target_peer_id: int | None = None
     pm_alerts_store: PmAlertCooldownStore | None = None
+    pm_alert_messages_store: PmAlertMessagesStore | None = None
+    pm_alerts_auto_delete_task: asyncio.Task[Any] | None = None
     pm_alert_excluded_chat_ids: set[int] = set()
     need_bot_client = settings.pm_alerts_enabled or (settings.forwarding_enabled and settings.delivery_mode == "bot")
     if need_bot_client:
@@ -668,7 +854,21 @@ async def main() -> None:
         )
     if settings.pm_alerts_enabled:
         pm_alert_target_entity = await bot_client.get_entity(settings.pm_alert_target_chat)
+        pm_alert_target_peer_id = get_peer_id(pm_alert_target_entity)
         pm_alerts_store = PmAlertCooldownStore(settings.pm_alerts_file)
+        if settings.pm_alerts_auto_delete_enabled:
+            pm_alert_messages_store = PmAlertMessagesStore(settings.pm_alerts_auto_delete_file)
+            pm_alerts_auto_delete_task = asyncio.create_task(
+                _pm_alerts_auto_delete_loop(
+                    bot_client=bot_client,
+                    pm_alert_target_entity=pm_alert_target_entity,
+                    pm_alert_target_peer_id=pm_alert_target_peer_id,
+                    pm_alert_messages_store=pm_alert_messages_store,
+                    delete_hour=settings.pm_alerts_auto_delete_hour,
+                    delete_minute=settings.pm_alerts_auto_delete_minute,
+                    delete_after_hours=settings.pm_alerts_auto_delete_after_hours,
+                )
+            )
         if settings.pm_alerts_exclude_chats:
             excluded_entities = await _resolve_entities(client, settings.pm_alerts_exclude_chats)
             pm_alert_excluded_chat_ids = {get_peer_id(entity) for entity in excluded_entities}
@@ -732,6 +932,13 @@ async def main() -> None:
             logging.info(
                 "PM alerts exclusions enabled: %s chat(s)",
                 len(pm_alert_excluded_chat_ids),
+            )
+        if settings.pm_alerts_auto_delete_enabled:
+            logging.info(
+                "PM alerts auto-delete configured: at %02d:%02d, older than %dh, max allowed 48h",
+                settings.pm_alerts_auto_delete_hour,
+                settings.pm_alerts_auto_delete_minute,
+                settings.pm_alerts_auto_delete_after_hours,
             )
 
     if settings.forwarding_enabled:
@@ -990,7 +1197,15 @@ async def main() -> None:
             alert_text = f"{sender_label} отправил(-а) новое сообщение"
 
         try:
-            await bot_client.send_message(pm_alert_target_entity, alert_text, link_preview=False)
+            sent_message = await bot_client.send_message(pm_alert_target_entity, alert_text, link_preview=False)
+            sent_message_id = _extract_message_id(sent_message)
+            if (
+                settings.pm_alerts_auto_delete_enabled
+                and pm_alert_messages_store is not None
+                and pm_alert_target_peer_id is not None
+                and sent_message_id is not None
+            ):
+                await pm_alert_messages_store.add(pm_alert_target_peer_id, sent_message_id)
             logging.info("Sent PM alert for %s", sender_label)
         except Exception as exc:
             logging.exception("Failed to send PM alert for %s: %s", sender_label, exc)
@@ -1042,7 +1257,13 @@ async def main() -> None:
                 logging.exception("Failed to edit forwarded message from %s: %s", source_title, exc)
 
     logging.info("Forwarder is running. Press Ctrl+C to stop.")
-    await client.run_until_disconnected()
+    try:
+        await client.run_until_disconnected()
+    finally:
+        if pm_alerts_auto_delete_task is not None:
+            pm_alerts_auto_delete_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await pm_alerts_auto_delete_task
 
 
 if __name__ == "__main__":

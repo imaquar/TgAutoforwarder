@@ -9,7 +9,7 @@ Telegram autoforwarder on Python + Telethon.
 - Preserves grouped media (albums) as grouped messages in target chat.
 - In `DELIVERY_MODE=user`, marks target dialog as unread after forwarding.
 - Syncs edits: when source message is edited, forwarded text/caption is updated (`user` and `bot` modes).
-- Optional PM alerts with cooldown and language (`eng` / `ru`).
+- Optional PM alerts with cooldown, language (`eng` / `ru`), and scheduled auto-delete.
 - Supports login by phone code or QR (`AUTH_MODE=qr`).
 
 ## 1. Install
@@ -109,6 +109,10 @@ PM_ALERT_TARGET_CHAT=
 PM_ALERT_COOLDOWN_MINUTES=60
 PM_ALERTS_LANG=eng
 PM_ALERTS_FILE=autoforwarder_pm_alerts.json
+PM_ALERTS_AUTO_DELETE_ENABLED=false
+PM_ALERTS_AUTO_DELETE_TIME=05:00
+PM_ALERTS_AUTO_DELETE_AFTER_HOURS=24
+PM_ALERTS_AUTO_DELETE_FILE=autoforwarder_pm_alerts_messages.json
 # optional ignore list
 PM_ALERTS_EXCLUDE_CHATS=@john,123456789
 ```
@@ -119,6 +123,11 @@ PM_ALERTS_EXCLUDE_CHATS=@john,123456789
 - Example: `60` means one alert per sender per 60 minutes, `0` disables cooldown.
 - `PM_ALERTS_LANG`: alert text language (`eng` or `ru`).
 - `PM_ALERTS_FILE`: file with cooldown state, so limits survive restarts.
+- `PM_ALERTS_AUTO_DELETE_ENABLED`: enable scheduled deletion of PM alert messages.
+- `PM_ALERTS_AUTO_DELETE_TIME`: daily delete time (`HH:MM`, server local time), for example `05:00`.
+- `PM_ALERTS_AUTO_DELETE_AFTER_HOURS`: delete alerts older than this number of hours.
+- Maximum for `PM_ALERTS_AUTO_DELETE_AFTER_HOURS` is `48` hours.
+- `PM_ALERTS_AUTO_DELETE_FILE`: file with PM alert message IDs used by auto-delete.
 - `PM_ALERTS_EXCLUDE_CHATS`: users/chats to ignore for PM alerts.
 
 PM alerts text:
