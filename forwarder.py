@@ -23,6 +23,7 @@ class Settings:
     api_id: int
     api_hash: str
     session_name: str
+    forwarding_enabled: bool
     source_chats: list[str]
     target_chat: str | int | None
     delivery_mode: str
@@ -268,6 +269,7 @@ def load_settings(require_routing: bool = True) -> Settings:
     api_hash = os.getenv("API_HASH")
     source_chats_raw = os.getenv("SOURCE_CHATS", "")
     target_chat = os.getenv("TARGET_CHAT", "")
+    forwarding_enabled = _parse_bool(os.getenv("FORWARDING_ENABLED"), default=True)
     delivery_mode = _parse_delivery_mode(os.getenv("DELIVERY_MODE"))
     bot_token = (os.getenv("BOT_TOKEN") or "").strip() or None
     bot_target_chat_raw = (os.getenv("BOT_TARGET_CHAT") or "").strip()
@@ -288,36 +290,37 @@ def load_settings(require_routing: bool = True) -> Settings:
     default_message_map_file_bot = f"{session_name}_message_map_bot.json"
     default_message_map_file_user = f"{session_name}_message_map_user.json"
 
-    source_chats: list[str] = []
-    target_chat_ref: str | int | None = None
-    bot_target_chat_ref: str | int | None = None
+    source_chats: list[str] = [item.strip() for item in source_chats_raw.split(",") if item.strip()]
+    target_chat_ref: str | int | None = _coerce_ref(target_chat.strip()) if target_chat.strip() else None
+    bot_target_chat_ref: str | int | None = _coerce_ref(bot_target_chat_raw) if bot_target_chat_raw else None
     pm_alert_target_chat_ref: str | int | None = None
-    if require_routing:
-        if not source_chats_raw.strip():
+    if require_routing and forwarding_enabled:
+        if not source_chats:
             raise ValueError("Environment variable SOURCE_CHATS is required")
-        if not target_chat.strip():
+        if target_chat_ref is None:
             raise ValueError("Environment variable TARGET_CHAT is required")
 
-        source_chats = [item.strip() for item in source_chats_raw.split(",") if item.strip()]
-        if not source_chats:
-            raise ValueError("SOURCE_CHATS must contain at least one chat reference")
+    if require_routing and not forwarding_enabled and not pm_alerts_enabled:
+        raise ValueError("Nothing to run: set FORWARDING_ENABLED=true or PM_ALERTS_ENABLED=true")
 
-        target_chat_ref = _coerce_ref(target_chat.strip())
-        if delivery_mode == "bot" or pm_alerts_enabled:
-            if not bot_token:
-                raise ValueError("Environment variable BOT_TOKEN is required when DELIVERY_MODE=bot or PM_ALERTS_ENABLED=true")
-        if delivery_mode == "bot":
-            bot_target_chat_ref = _coerce_ref(bot_target_chat_raw) if bot_target_chat_raw else target_chat_ref
-        if pm_alerts_enabled:
-            default_pm_alert_target = bot_target_chat_ref or target_chat_ref
-            pm_alert_target_chat_ref = _coerce_ref(pm_alert_target_chat_raw) if pm_alert_target_chat_raw else default_pm_alert_target
-            if pm_alert_target_chat_ref is None:
-                raise ValueError("Could not resolve PM alerts target chat. Set PM_ALERT_TARGET_CHAT explicitly.")
+    if (forwarding_enabled and delivery_mode == "bot") or pm_alerts_enabled:
+        if not bot_token:
+            raise ValueError("Environment variable BOT_TOKEN is required when DELIVERY_MODE=bot and forwarding is enabled, or when PM_ALERTS_ENABLED=true")
+
+    if forwarding_enabled and delivery_mode == "bot":
+        bot_target_chat_ref = bot_target_chat_ref or target_chat_ref
+
+    if pm_alerts_enabled:
+        default_pm_alert_target = bot_target_chat_ref or target_chat_ref
+        pm_alert_target_chat_ref = _coerce_ref(pm_alert_target_chat_raw) if pm_alert_target_chat_raw else default_pm_alert_target
+        if pm_alert_target_chat_ref is None:
+            raise ValueError("Could not resolve PM alerts target chat. Set PM_ALERT_TARGET_CHAT explicitly.")
 
     return Settings(
         api_id=api_id,
         api_hash=api_hash,
         session_name=session_name,
+        forwarding_enabled=forwarding_enabled,
         source_chats=source_chats,
         target_chat=target_chat_ref,
         delivery_mode=delivery_mode,
@@ -634,29 +637,35 @@ async def main() -> None:
         await client.disconnect()
         return
 
-    source_entities = await _resolve_entities(client, settings.source_chats)
-    target_entity = await client.get_entity(settings.target_chat)
+    source_entities: list[Any] = []
+    target_entity: Any | None = None
+    if settings.forwarding_enabled:
+        source_entities = await _resolve_entities(client, settings.source_chats)
+        target_entity = await client.get_entity(settings.target_chat)
 
     bot_client: TelegramClient | None = None
     bot_target_entity: Any | None = None
     message_map_store: MessageMapStore | None = None
+    active_message_map_file: str | None = None
     pm_alert_target_entity: Any | None = None
     pm_alerts_store: PmAlertCooldownStore | None = None
     pm_alert_excluded_chat_ids: set[int] = set()
-    if settings.delivery_mode == "bot" or settings.pm_alerts_enabled:
+    need_bot_client = settings.pm_alerts_enabled or (settings.forwarding_enabled and settings.delivery_mode == "bot")
+    if need_bot_client:
         bot_client = TelegramClient(f"{settings.session_name}_bot_sender", settings.api_id, settings.api_hash)
         await bot_client.start(bot_token=settings.bot_token)
-    if settings.delivery_mode == "bot":
+    if settings.forwarding_enabled and settings.delivery_mode == "bot":
         bot_target_entity = await bot_client.get_entity(settings.bot_target_chat)
-    active_message_map_file = (
-        settings.message_map_file_bot
-        if settings.delivery_mode == "bot"
-        else settings.message_map_file_user
-    )
-    message_map_store = MessageMapStore(
-        active_message_map_file,
-        ttl_days=settings.message_map_ttl_days,
-    )
+    if settings.forwarding_enabled:
+        active_message_map_file = (
+            settings.message_map_file_bot
+            if settings.delivery_mode == "bot"
+            else settings.message_map_file_user
+        )
+        message_map_store = MessageMapStore(
+            active_message_map_file,
+            ttl_days=settings.message_map_ttl_days,
+        )
     if settings.pm_alerts_enabled:
         pm_alert_target_entity = await bot_client.get_entity(settings.pm_alert_target_chat)
         pm_alerts_store = PmAlertCooldownStore(settings.pm_alerts_file)
@@ -664,44 +673,54 @@ async def main() -> None:
             excluded_entities = await _resolve_entities(client, settings.pm_alerts_exclude_chats)
             pm_alert_excluded_chat_ids = {get_peer_id(entity) for entity in excluded_entities}
 
-    source_peer_ids = {get_peer_id(entity) for entity in source_entities}
+    source_peer_ids: set[int] = set()
     target_peer_id: int | None = None
-    try:
-        if settings.delivery_mode == "bot":
-            target_peer_id = get_peer_id(await client.get_entity(settings.bot_target_chat))
-        else:
-            target_peer_id = get_peer_id(target_entity)
-    except Exception:
-        logging.warning("Could not resolve delivery target in user account. Target loop protection may be limited.")
+    if settings.forwarding_enabled:
+        source_peer_ids = {get_peer_id(entity) for entity in source_entities}
+        try:
+            if settings.delivery_mode == "bot":
+                target_peer_id = get_peer_id(await client.get_entity(settings.bot_target_chat))
+            else:
+                target_peer_id = get_peer_id(target_entity)
+        except Exception:
+            logging.warning("Could not resolve delivery target in user account. Target loop protection may be limited.")
 
-    global_allowed_sender_ids = await _resolve_allowed_sender_ids(client, settings.allowed_senders)
-    chat_allowed_sender_ids = await _resolve_chat_sender_filters(client, settings.chat_allowed_senders)
+    global_allowed_sender_ids: set[int] = set()
+    chat_allowed_sender_ids: dict[int, set[int]] = {}
+    if settings.forwarding_enabled:
+        global_allowed_sender_ids = await _resolve_allowed_sender_ids(client, settings.allowed_senders)
+        chat_allowed_sender_ids = await _resolve_chat_sender_filters(client, settings.chat_allowed_senders)
 
-    if target_peer_id is not None and target_peer_id in source_peer_ids:
-        logging.warning("Target chat is also in SOURCE_CHATS. Messages from it will be ignored to avoid loops.")
-    for chat_peer_id in chat_allowed_sender_ids:
-        if chat_peer_id not in source_peer_ids:
-            logging.warning(
-                "CHAT_ALLOWED_SENDERS contains chat %s that is not in SOURCE_CHATS. This filter will not be used.",
-                chat_peer_id,
-            )
+        if target_peer_id is not None and target_peer_id in source_peer_ids:
+            logging.warning("Target chat is also in SOURCE_CHATS. Messages from it will be ignored to avoid loops.")
+        for chat_peer_id in chat_allowed_sender_ids:
+            if chat_peer_id not in source_peer_ids:
+                logging.warning(
+                    "CHAT_ALLOWED_SENDERS contains chat %s that is not in SOURCE_CHATS. This filter will not be used.",
+                    chat_peer_id,
+                )
+    elif settings.allowed_senders or settings.chat_allowed_senders:
+        logging.warning("Sender filters are configured but FORWARDING_ENABLED=false. They will be ignored.")
 
     me = await client.get_me()
     logging.info("Connected as %s", me.username or me.id)
-    if settings.delivery_mode == "bot":
-        bot_me = await bot_client.get_me()
-        logging.info("Delivery mode: bot")
-        logging.info("Bot sender: %s", bot_me.username or bot_me.id)
-        logging.info("Target chat (bot): %s", _entity_label(bot_target_entity))
+    if settings.forwarding_enabled:
+        if settings.delivery_mode == "bot":
+            bot_me = await bot_client.get_me()
+            logging.info("Delivery mode: bot")
+            logging.info("Bot sender: %s", bot_me.username or bot_me.id)
+            logging.info("Target chat (bot): %s", _entity_label(bot_target_entity))
+        else:
+            logging.info("Delivery mode: user")
+            logging.info("Target chat: %s", _entity_label(target_entity))
+        logging.info("Message map file: %s", active_message_map_file)
+        logging.info("Source chats: %s", ", ".join(_entity_label(entity) for entity in source_entities))
+        if global_allowed_sender_ids:
+            logging.info("Global sender filter enabled: %s sender(s)", len(global_allowed_sender_ids))
+        if chat_allowed_sender_ids:
+            logging.info("Per-chat sender filter enabled for %s chat(s)", len(chat_allowed_sender_ids))
     else:
-        logging.info("Delivery mode: user")
-        logging.info("Target chat: %s", _entity_label(target_entity))
-    logging.info("Message map file: %s", active_message_map_file)
-    logging.info("Source chats: %s", ", ".join(_entity_label(entity) for entity in source_entities))
-    if global_allowed_sender_ids:
-        logging.info("Global sender filter enabled: %s sender(s)", len(global_allowed_sender_ids))
-    if chat_allowed_sender_ids:
-        logging.info("Per-chat sender filter enabled for %s chat(s)", len(chat_allowed_sender_ids))
+        logging.info("Forwarding from SOURCE_CHATS is disabled (FORWARDING_ENABLED=false).")
     if settings.pm_alerts_enabled:
         logging.info(
             "PM alerts enabled: target=%s, cooldown=%s minute(s), lang=%s",
@@ -715,224 +734,225 @@ async def main() -> None:
                 len(pm_alert_excluded_chat_ids),
             )
 
-    def _passes_forward_filters(chat_id: int | None, sender_id: int | None, is_out: bool) -> bool:
-        if chat_id is None:
-            return False
+    if settings.forwarding_enabled:
+        def _passes_forward_filters(chat_id: int | None, sender_id: int | None, is_out: bool) -> bool:
+            if chat_id is None:
+                return False
 
-        if settings.skip_outgoing and is_out:
-            return False
+            if settings.skip_outgoing and is_out:
+                return False
 
-        if target_peer_id is not None and chat_id == target_peer_id:
-            return False
+            if target_peer_id is not None and chat_id == target_peer_id:
+                return False
 
-        allowed_for_chat = chat_allowed_sender_ids.get(chat_id)
-        if allowed_for_chat is not None:
-            return sender_id is not None and sender_id in allowed_for_chat
+            allowed_for_chat = chat_allowed_sender_ids.get(chat_id)
+            if allowed_for_chat is not None:
+                return sender_id is not None and sender_id in allowed_for_chat
 
-        if global_allowed_sender_ids:
-            return sender_id is not None and sender_id in global_allowed_sender_ids
+            if global_allowed_sender_ids:
+                return sender_id is not None and sender_id in global_allowed_sender_ids
 
-        return True
+            return True
 
-    @client.on(events.NewMessage(chats=source_entities))
-    async def forward_message(event: events.NewMessage.Event) -> None:
-        if not _passes_forward_filters(event.chat_id, event.sender_id, event.out):
-            return
+        @client.on(events.NewMessage(chats=source_entities))
+        async def forward_message(event: events.NewMessage.Event) -> None:
+            if not _passes_forward_filters(event.chat_id, event.sender_id, event.out):
+                return
 
-        message = event.message
-        if message is None or message.action is not None:
-            return
-        if message.grouped_id is not None:
-            # Album messages are handled by events.Album to preserve grouping.
-            return
+            message = event.message
+            if message is None or message.action is not None:
+                return
+            if message.grouped_id is not None:
+                # Album messages are handled by events.Album to preserve grouping.
+                return
 
-        source = await event.get_chat()
-        source_title = _entity_label(source)
-        original_text = (message.message or "").strip()
-        message_url = _build_message_url(source, message.id)
-        formatted_text = _format_prefixed_html(source_title, original_text, message_url=message_url)
-        formatted_prefix_only = _format_prefixed_html(source_title, "", message_url=message_url)
-        sent_target_message_id: int | None = None
+            source = await event.get_chat()
+            source_title = _entity_label(source)
+            original_text = (message.message or "").strip()
+            message_url = _build_message_url(source, message.id)
+            formatted_text = _format_prefixed_html(source_title, original_text, message_url=message_url)
+            formatted_prefix_only = _format_prefixed_html(source_title, "", message_url=message_url)
+            sent_target_message_id: int | None = None
 
-        try:
-            if message.media:
-                caption = formatted_text
-                if settings.delivery_mode == "bot":
-                    try:
-                        send_result = await _send_media_as_bot(
-                            source_client=client,
-                            bot_client=bot_client,
-                            bot_target_entity=bot_target_entity,
-                            message=message,
-                            caption=caption,
-                        )
-                        sent_target_message_id = _extract_message_id(send_result)
-                    except Exception:
-                        sent_msg = await bot_client.send_message(
-                            bot_target_entity,
-                            formatted_prefix_only,
-                            link_preview=False,
-                            parse_mode="html",
-                        )
-                        sent_target_message_id = _extract_message_id(sent_msg)
-                else:
-                    try:
-                        sent_msg = await client.send_file(
-                            target_entity,
-                            file=message.media,
-                            caption=caption,
-                            link_preview=False,
-                            parse_mode="html",
-                        )
-                        sent_target_message_id = _extract_message_id(sent_msg)
-                    except Exception:
-                        # Some media types may not allow captions.
-                        sent_msg = await client.send_message(
-                            target_entity,
-                            formatted_prefix_only,
-                            link_preview=False,
-                            parse_mode="html",
-                        )
-                        sent_target_message_id = _extract_message_id(sent_msg)
-                        await client.forward_messages(target_entity, message)
-            else:
-                if not original_text:
-                    return
-                if settings.delivery_mode == "bot":
-                    sent_msg = await bot_client.send_message(
-                        bot_target_entity,
-                        formatted_text,
-                        link_preview=False,
-                        parse_mode="html",
-                    )
-                    sent_target_message_id = _extract_message_id(sent_msg)
-                else:
-                    sent_msg = await client.send_message(
-                        target_entity,
-                        formatted_text,
-                        link_preview=False,
-                        parse_mode="html",
-                    )
-                    sent_target_message_id = _extract_message_id(sent_msg)
-
-            if (
-                message_map_store is not None
-                and sent_target_message_id is not None
-                and event.chat_id is not None
-            ):
-                await message_map_store.set(event.chat_id, message.id, sent_target_message_id)
-
-            if settings.delivery_mode == "user":
-                await client(functions.messages.MarkDialogUnreadRequest(peer=target_entity, unread=True))
-            logging.info("Forwarded message from %s", source_title)
-        except Exception as exc:
-            logging.exception("Failed to forward message from %s: %s", source_title, exc)
-
-    @client.on(events.Album(chats=source_entities))
-    async def forward_album(event: events.Album.Event) -> None:
-        if not _passes_forward_filters(event.chat_id, event.sender_id, event.out):
-            return
-
-        album_messages = [
-            message
-            for message in event.messages
-            if message is not None and message.media and message.action is None
-        ]
-        if not album_messages:
-            return
-
-        source = await event.get_chat()
-        source_title = _entity_label(source)
-        first_message_url = _build_message_url(source, album_messages[0].id)
-
-        captions: list[str] = []
-        for idx, message in enumerate(album_messages):
-            text = (message.message or "").strip()
-            if idx == 0:
-                captions.append(_format_prefixed_html(source_title, text, message_url=first_message_url))
-            else:
-                captions.append(html.escape(text) if text else "")
-
-        sent_target_ids: list[int] = []
-        try:
-            if settings.delivery_mode == "bot":
-                try:
-                    send_result = await _send_album_as_bot(
-                        source_client=client,
-                        bot_client=bot_client,
-                        bot_target_entity=bot_target_entity,
-                        messages=album_messages,
-                        captions=captions,
-                    )
-                    sent_target_ids = _extract_message_ids(send_result)
-                except Exception:
-                    logging.exception(
-                        "Failed to send album as grouped media from %s; falling back to separate messages.",
-                        source_title,
-                    )
-                    for idx, message in enumerate(album_messages):
+            try:
+                if message.media:
+                    caption = formatted_text
+                    if settings.delivery_mode == "bot":
                         try:
                             send_result = await _send_media_as_bot(
                                 source_client=client,
                                 bot_client=bot_client,
                                 bot_target_entity=bot_target_entity,
                                 message=message,
-                                caption=captions[idx],
+                                caption=caption,
                             )
-                            sent_message_id = _extract_message_id(send_result)
-                            if sent_message_id is not None:
-                                sent_target_ids.append(sent_message_id)
+                            sent_target_message_id = _extract_message_id(send_result)
                         except Exception:
-                            logging.exception(
-                                "Failed to send album item %s from %s",
-                                idx + 1,
-                                source_title,
-                            )
-            else:
-                try:
-                    send_result = await client.send_file(
-                        target_entity,
-                        file=[message.media for message in album_messages],
-                        caption=captions,
-                        link_preview=False,
-                        parse_mode="html",
-                    )
-                    sent_target_ids = _extract_message_ids(send_result)
-                except Exception:
-                    logging.exception(
-                        "Failed to send album as grouped media from %s; falling back to separate messages.",
-                        source_title,
-                    )
-                    for idx, message in enumerate(album_messages):
-                        try:
-                            send_result = await client.send_file(
-                                target_entity,
-                                file=message.media,
-                                caption=captions[idx],
+                            sent_msg = await bot_client.send_message(
+                                bot_target_entity,
+                                formatted_prefix_only,
                                 link_preview=False,
                                 parse_mode="html",
                             )
-                            sent_message_id = _extract_message_id(send_result)
-                            if sent_message_id is not None:
-                                sent_target_ids.append(sent_message_id)
-                        except Exception:
-                            logging.exception(
-                                "Failed to send album item %s from %s",
-                                idx + 1,
-                                source_title,
+                            sent_target_message_id = _extract_message_id(sent_msg)
+                    else:
+                        try:
+                            sent_msg = await client.send_file(
+                                target_entity,
+                                file=message.media,
+                                caption=caption,
+                                link_preview=False,
+                                parse_mode="html",
                             )
+                            sent_target_message_id = _extract_message_id(sent_msg)
+                        except Exception:
+                            # Some media types may not allow captions.
+                            sent_msg = await client.send_message(
+                                target_entity,
+                                formatted_prefix_only,
+                                link_preview=False,
+                                parse_mode="html",
+                            )
+                            sent_target_message_id = _extract_message_id(sent_msg)
+                            await client.forward_messages(target_entity, message)
+                else:
+                    if not original_text:
+                        return
+                    if settings.delivery_mode == "bot":
+                        sent_msg = await bot_client.send_message(
+                            bot_target_entity,
+                            formatted_text,
+                            link_preview=False,
+                            parse_mode="html",
+                        )
+                        sent_target_message_id = _extract_message_id(sent_msg)
+                    else:
+                        sent_msg = await client.send_message(
+                            target_entity,
+                            formatted_text,
+                            link_preview=False,
+                            parse_mode="html",
+                        )
+                        sent_target_message_id = _extract_message_id(sent_msg)
 
-            if (
-                message_map_store is not None
-                and event.chat_id is not None
-                and sent_target_ids
-            ):
-                for source_message, target_message_id in zip(album_messages, sent_target_ids):
-                    await message_map_store.set(event.chat_id, source_message.id, target_message_id)
+                if (
+                    message_map_store is not None
+                    and sent_target_message_id is not None
+                    and event.chat_id is not None
+                ):
+                    await message_map_store.set(event.chat_id, message.id, sent_target_message_id)
 
-            logging.info("Forwarded album from %s", source_title)
-        except Exception as exc:
-            logging.exception("Failed to forward album from %s: %s", source_title, exc)
+                if settings.delivery_mode == "user":
+                    await client(functions.messages.MarkDialogUnreadRequest(peer=target_entity, unread=True))
+                logging.info("Forwarded message from %s", source_title)
+            except Exception as exc:
+                logging.exception("Failed to forward message from %s: %s", source_title, exc)
+
+        @client.on(events.Album(chats=source_entities))
+        async def forward_album(event: events.Album.Event) -> None:
+            if not _passes_forward_filters(event.chat_id, event.sender_id, event.out):
+                return
+
+            album_messages = [
+                message
+                for message in event.messages
+                if message is not None and message.media and message.action is None
+            ]
+            if not album_messages:
+                return
+
+            source = await event.get_chat()
+            source_title = _entity_label(source)
+            first_message_url = _build_message_url(source, album_messages[0].id)
+
+            captions: list[str] = []
+            for idx, message in enumerate(album_messages):
+                text = (message.message or "").strip()
+                if idx == 0:
+                    captions.append(_format_prefixed_html(source_title, text, message_url=first_message_url))
+                else:
+                    captions.append(html.escape(text) if text else "")
+
+            sent_target_ids: list[int] = []
+            try:
+                if settings.delivery_mode == "bot":
+                    try:
+                        send_result = await _send_album_as_bot(
+                            source_client=client,
+                            bot_client=bot_client,
+                            bot_target_entity=bot_target_entity,
+                            messages=album_messages,
+                            captions=captions,
+                        )
+                        sent_target_ids = _extract_message_ids(send_result)
+                    except Exception:
+                        logging.exception(
+                            "Failed to send album as grouped media from %s; falling back to separate messages.",
+                            source_title,
+                        )
+                        for idx, message in enumerate(album_messages):
+                            try:
+                                send_result = await _send_media_as_bot(
+                                    source_client=client,
+                                    bot_client=bot_client,
+                                    bot_target_entity=bot_target_entity,
+                                    message=message,
+                                    caption=captions[idx],
+                                )
+                                sent_message_id = _extract_message_id(send_result)
+                                if sent_message_id is not None:
+                                    sent_target_ids.append(sent_message_id)
+                            except Exception:
+                                logging.exception(
+                                    "Failed to send album item %s from %s",
+                                    idx + 1,
+                                    source_title,
+                                )
+                else:
+                    try:
+                        send_result = await client.send_file(
+                            target_entity,
+                            file=[message.media for message in album_messages],
+                            caption=captions,
+                            link_preview=False,
+                            parse_mode="html",
+                        )
+                        sent_target_ids = _extract_message_ids(send_result)
+                    except Exception:
+                        logging.exception(
+                            "Failed to send album as grouped media from %s; falling back to separate messages.",
+                            source_title,
+                        )
+                        for idx, message in enumerate(album_messages):
+                            try:
+                                send_result = await client.send_file(
+                                    target_entity,
+                                    file=message.media,
+                                    caption=captions[idx],
+                                    link_preview=False,
+                                    parse_mode="html",
+                                )
+                                sent_message_id = _extract_message_id(send_result)
+                                if sent_message_id is not None:
+                                    sent_target_ids.append(sent_message_id)
+                            except Exception:
+                                logging.exception(
+                                    "Failed to send album item %s from %s",
+                                    idx + 1,
+                                    source_title,
+                                )
+
+                if (
+                    message_map_store is not None
+                    and event.chat_id is not None
+                    and sent_target_ids
+                ):
+                    for source_message, target_message_id in zip(album_messages, sent_target_ids):
+                        await message_map_store.set(event.chat_id, source_message.id, target_message_id)
+
+                logging.info("Forwarded album from %s", source_title)
+            except Exception as exc:
+                logging.exception("Failed to forward album from %s: %s", source_title, exc)
 
     @client.on(events.NewMessage(incoming=True))
     async def pm_alerts_handler(event: events.NewMessage.Event) -> None:
@@ -975,50 +995,51 @@ async def main() -> None:
         except Exception as exc:
             logging.exception("Failed to send PM alert for %s: %s", sender_label, exc)
 
-    @client.on(events.MessageEdited(chats=source_entities))
-    async def edit_forwarded_message(event: events.MessageEdited.Event) -> None:
-        if message_map_store is None:
-            return
+    if settings.forwarding_enabled:
+        @client.on(events.MessageEdited(chats=source_entities))
+        async def edit_forwarded_message(event: events.MessageEdited.Event) -> None:
+            if message_map_store is None:
+                return
 
-        if not _passes_forward_filters(event.chat_id, event.sender_id, event.out):
-            return
+            if not _passes_forward_filters(event.chat_id, event.sender_id, event.out):
+                return
 
-        message = event.message
-        if message is None or message.action is not None or event.chat_id is None:
-            return
+            message = event.message
+            if message is None or message.action is not None or event.chat_id is None:
+                return
 
-        mapped_target_message_id = await message_map_store.get(event.chat_id, message.id)
-        if mapped_target_message_id is None:
-            return
+            mapped_target_message_id = await message_map_store.get(event.chat_id, message.id)
+            if mapped_target_message_id is None:
+                return
 
-        source = await event.get_chat()
-        source_title = _entity_label(source)
-        original_text = (message.message or "").strip()
-        message_url = _build_message_url(source, message.id)
-        formatted_text = _format_prefixed_html(source_title, original_text, message_url=message_url)
+            source = await event.get_chat()
+            source_title = _entity_label(source)
+            original_text = (message.message or "").strip()
+            message_url = _build_message_url(source, message.id)
+            formatted_text = _format_prefixed_html(source_title, original_text, message_url=message_url)
 
-        try:
-            if settings.delivery_mode == "bot":
-                await bot_client.edit_message(
-                    bot_target_entity,
-                    mapped_target_message_id,
-                    formatted_text,
-                    link_preview=False,
-                    parse_mode="html",
-                )
-            else:
-                await client.edit_message(
-                    target_entity,
-                    mapped_target_message_id,
-                    formatted_text,
-                    link_preview=False,
-                    parse_mode="html",
-                )
-            logging.info("Edited forwarded message from %s", source_title)
-        except errors.MessageNotModifiedError:
-            pass
-        except Exception as exc:
-            logging.exception("Failed to edit forwarded message from %s: %s", source_title, exc)
+            try:
+                if settings.delivery_mode == "bot":
+                    await bot_client.edit_message(
+                        bot_target_entity,
+                        mapped_target_message_id,
+                        formatted_text,
+                        link_preview=False,
+                        parse_mode="html",
+                    )
+                else:
+                    await client.edit_message(
+                        target_entity,
+                        mapped_target_message_id,
+                        formatted_text,
+                        link_preview=False,
+                        parse_mode="html",
+                    )
+                logging.info("Edited forwarded message from %s", source_title)
+            except errors.MessageNotModifiedError:
+                pass
+            except Exception as exc:
+                logging.exception("Failed to edit forwarded message from %s: %s", source_title, exc)
 
     logging.info("Forwarder is running. Press Ctrl+C to stop.")
     await client.run_until_disconnected()

@@ -37,15 +37,18 @@ SESSION_NAME=autoforwarder
 AUTH_MODE=phone
 ```
 
-## 4. Required: forwarding route
+## 4. Forwarding route
 
 ```env
 SOURCE_CHATS=@chat_one,@chat_two
 TARGET_CHAT=@my_target_chat
+FORWARDING_ENABLED=true
 SKIP_OUTGOING=true
 ```
 
 - `SOURCE_CHATS` and `TARGET_CHAT` support `@username`, links, and numeric IDs.
+- `FORWARDING_ENABLED=false` disables forwarding from `SOURCE_CHATS` completely.
+- If `FORWARDING_ENABLED=false`, enable `PM_ALERTS_ENABLED=true` to keep script active.
 - `SKIP_OUTGOING=true` means your own outgoing messages from `SOURCE_CHATS` will be ignored.  
 - Set `SKIP_OUTGOING=false` if you want to forward your own messages too.
 
@@ -122,6 +125,12 @@ PM alerts text:
 
 - `eng`: `<Name> sent a new message`
 - `ru`: `<Name> отправил(-а) новое сообщение`
+
+If you want only PM alerts and no chat forwarding:
+```env
+FORWARDING_ENABLED=false
+PM_ALERTS_ENABLED=true
+```
 
 ## 9. Run
 
