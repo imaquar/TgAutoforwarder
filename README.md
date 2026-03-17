@@ -1,133 +1,156 @@
 # TgAutoforwarder
 
-A Python + Telethon service for automatically forwarding messages from multiple chats into one target chat.
+Telegram autoforwarder on Python + Telethon.
 
 ## Features
 - Listens for new messages in `SOURCE_CHATS`.
-- Sends them to `TARGET_CHAT` either from your user account or from a bot.
-- Adds a `[Source Chat Name]` prefix to the beginning of message text/caption.
-- Preserves grouped media (albums) as grouped messages in the target chat.
-- In `DELIVERY_MODE=user`, marks the target dialog as unread after each forwarded message.
-- Syncs edits: when a source message is edited, forwarded message text/caption is updated (`user` and `bot` modes).
-- Optional PM alerts: on a new private message from a user, bot sends `<Name> sent a new message` or `<Name> отправил(-а) новое сообщение` with per-sender cooldown.
-- Supports login by phone code or by QR (`AUTH_MODE=qr`).
+- Sends them to `TARGET_CHAT` from your user account or from a bot.
+- Adds a `[Source Chat Name]` prefix to message text/caption.
+- Preserves grouped media (albums) as grouped messages in target chat.
+- In `DELIVERY_MODE=user`, marks target dialog as unread after forwarding.
+- Syncs edits: when source message is edited, forwarded text/caption is updated (`user` and `bot` modes).
+- Optional PM alerts with cooldown and language (`eng` / `ru`).
+- Supports login by phone code or QR (`AUTH_MODE=qr`).
 
-## Installation
+## 1. Install
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Configuration
-1. Get your `API_ID` and `API_HASH` from https://my.telegram.org.
-2. Copy `.env.example` to `.env`:
-   ```bash
-   cp .env.example .env
-   ```
-3. Fill in the values in `.env`.
+## 2. Create `.env`
 
-Example:
+```bash
+cp .env.example .env
+```
+
+## 3. Required: Telegram API
+
+Get `API_ID` and `API_HASH` at `https://my.telegram.org`.
+
 ```env
 API_ID=123456
-API_HASH=xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+API_HASH=your_api_hash_here
 SESSION_NAME=autoforwarder
-DELIVERY_MODE=user
 AUTH_MODE=phone
+```
+
+## 4. Required: forwarding route
+
+```env
 SOURCE_CHATS=@chat_one,@chat_two
 TARGET_CHAT=@my_target_chat
-BOT_TOKEN=
-BOT_TARGET_CHAT=
-MESSAGE_MAP_FILE_BOT=autoforwarder_message_map_bot.json
-MESSAGE_MAP_FILE_USER=autoforwarder_message_map_user.json
-MESSAGE_MAP_TTL_DAYS=7
-PM_ALERTS_ENABLED=false
-PM_ALERT_TARGET_CHAT=
-PM_ALERT_COOLDOWN_MINUTES=60
-PM_ALERTS_LANG=eng
-PM_ALERTS_FILE=autoforwarder_pm_alerts.json
-PM_ALERTS_EXCLUDE_CHATS=
 SKIP_OUTGOING=true
-ALLOWED_SENDERS=
-CHAT_ALLOWED_SENDERS=
 ```
 
-## Run
-```bash
-python forwarder.py
-```
+`SOURCE_CHATS` and `TARGET_CHAT` support `@username`, links, and numeric IDs.
+`SKIP_OUTGOING=true` means your own outgoing messages from `SOURCE_CHATS` will be ignored.
+Set `SKIP_OUTGOING=false` if you want to forward your own messages too.
 
-Before running, set message map settings in `.env`:
+## 5. Delivery mode
+
+User mode:
+
 ```env
-MESSAGE_MAP_FILE_BOT=autoforwarder_message_map_bot.json
-MESSAGE_MAP_FILE_USER=autoforwarder_message_map_user.json
-MESSAGE_MAP_TTL_DAYS=7
+DELIVERY_MODE=user
 ```
 
-On first run in `AUTH_MODE=phone`, Telethon will ask for your phone number, login code, and 2FA password (if enabled).
+Bot mode:
 
-For QR login, set `AUTH_MODE=qr`, run the script, and scan the terminal QR in Telegram: `Settings -> Devices -> Link Desktop Device`.
-
-To deliver messages via bot, set:
 ```env
 DELIVERY_MODE=bot
 BOT_TOKEN=123456:your_bot_token
-# optional, falls back to TARGET_CHAT
-BOT_TARGET_CHAT=-1001234567890
+# optional, if empty TARGET_CHAT is used
+BOT_TARGET_CHAT=
 ```
 
-To enable PM alerts:
+`BOT_TOKEN` is required when `DELIVERY_MODE=bot`.
+
+## 6. Edit sync map storage
+
 ```env
-PM_ALERTS_ENABLED=true
-# optional, defaults to BOT_TARGET_CHAT or TARGET_CHAT
-PM_ALERT_TARGET_CHAT=-1001234567890
-PM_ALERT_COOLDOWN_MINUTES=60
-PM_ALERTS_LANG=eng
-PM_ALERTS_FILE=autoforwarder_pm_alerts.json
-# optional, skip alerts from these private chats/users
-PM_ALERTS_EXCLUDE_CHATS=@john,123456789
+MESSAGE_MAP_FILE_USER=autoforwarder_message_map_user.json
+MESSAGE_MAP_FILE_BOT=autoforwarder_message_map_bot.json
+MESSAGE_MAP_TTL_DAYS=7
 ```
 
-To print available chats and IDs:
-```bash
-python forwarder.py --list-chats
-```
-Optional limit:
-```bash
-python forwarder.py --list-chats --list-limit 500
-```
+- `MESSAGE_MAP_FILE_USER`: where mapping is stored in `DELIVERY_MODE=user`.
+- `MESSAGE_MAP_FILE_BOT`: where mapping is stored in `DELIVERY_MODE=bot`.
+- `MESSAGE_MAP_TTL_DAYS`: auto-cleanup for old mapping records.
+- Example: `7` means delete records older than 7 days, `0` disables cleanup.
 
-## Notes
-- `SOURCE_CHATS` supports `@username`, links, and numeric IDs.
-- `TARGET_CHAT` supports `@username`, links, and numeric IDs.
-- `DELIVERY_MODE=bot` requires `BOT_TOKEN`.
-- `BOT_TARGET_CHAT` is optional in bot mode; if empty, `TARGET_CHAT` is used.
-- `MESSAGE_MAP_FILE_BOT` stores source->target message IDs for edit syncing in `DELIVERY_MODE=bot`.
-- `MESSAGE_MAP_FILE_USER` stores source->target message IDs for edit syncing in `DELIVERY_MODE=user`.
-- `MESSAGE_MAP_TTL_DAYS` controls cleanup of old mapping records (`7` by default, `0` disables cleanup).
-- Edit syncing works for messages that were forwarded while this mapping file was being maintained.
-- `SKIP_OUTGOING=true` skips your own outgoing messages from `SOURCE_CHATS`; set it to `false` to forward your messages too.
-- `ALLOWED_SENDERS` is optional and applies one sender list to all `SOURCE_CHATS`.
-- `CHAT_ALLOWED_SENDERS` is optional JSON with per-chat sender lists and has priority over `ALLOWED_SENDERS`.
-- Sender filters accept usernames and numeric IDs.
-- For some media types where captions are not available, the service sends a separate prefix-only message as fallback.
+## 7. Optional sender filters
 
-### Optional PM Alerts
-- `PM_ALERTS_ENABLED=true` enables this additional feature for incoming private messages only (not groups/channels).
-- `PM alerts` always require `BOT_TOKEN`, even if `DELIVERY_MODE=user`.
-- `PM_ALERT_TARGET_CHAT` is optional; if empty, alerts are sent to `BOT_TARGET_CHAT` (or `TARGET_CHAT`).
-- `PM_ALERT_COOLDOWN_MINUTES` limits alerts to one per sender per cooldown window.
-- `PM_ALERTS_LANG` controls PM alert text language: `ru` or `eng` (default: `eng`).
-- `PM_ALERTS_FILE` persists PM alert cooldown state across restarts.
-- `PM_ALERTS_EXCLUDE_CHATS` skips PM alerts for selected private chats/users.
+Forward only specific senders from all source chats:
 
-## Sender Filter Examples
-Only selected senders from all source chats:
 ```env
 ALLOWED_SENDERS=@boss,123456789
 ```
 
-Different sender lists per chat:
+Per-chat filters (priority over `ALLOWED_SENDERS`):
+
 ```env
 CHAT_ALLOWED_SENDERS={"@work_chat":["@boss","123456789"],"-1001234567890":["@teamlead","777000"]}
 ```
+
+## 8. Optional PM alerts
+
+```env
+PM_ALERTS_ENABLED=true
+# required for PM alerts in any mode
+BOT_TOKEN=123456:your_bot_token
+# optional, default is BOT_TARGET_CHAT or TARGET_CHAT
+PM_ALERT_TARGET_CHAT=
+PM_ALERT_COOLDOWN_MINUTES=60
+PM_ALERTS_LANG=eng
+PM_ALERTS_FILE=autoforwarder_pm_alerts.json
+# optional ignore list
+PM_ALERTS_EXCLUDE_CHATS=@john,123456789
+```
+
+- `PM_ALERTS_ENABLED`: turns private-message alerts on/off.
+- `PM_ALERT_TARGET_CHAT`: where alerts are sent. If empty, fallback is `BOT_TARGET_CHAT` then `TARGET_CHAT`.
+- `PM_ALERT_COOLDOWN_MINUTES`: minimum interval between alerts from the same sender.
+- Example: `60` means one alert per sender per 60 minutes, `0` disables cooldown.
+- `PM_ALERTS_LANG`: alert text language (`eng` or `ru`).
+- `PM_ALERTS_FILE`: file with cooldown state, so limits survive restarts.
+- `PM_ALERTS_EXCLUDE_CHATS`: users/chats to ignore for PM alerts.
+
+PM alerts text:
+
+- `eng`: `<Name> sent a new message`
+- `ru`: `<Name> отправил(-а) новое сообщение`
+
+## 9. Run
+
+```bash
+python forwarder.py
+```
+
+If `AUTH_MODE=phone`, Telethon asks for phone/code/2FA.
+
+If `AUTH_MODE=qr`, scan terminal QR in Telegram:
+`Settings -> Devices -> Link Desktop Device`.
+
+## 10. Useful commands
+
+List chats and IDs:
+
+```bash
+python forwarder.py --list-chats
+```
+
+With custom limit:
+
+```bash
+python forwarder.py --list-chats --list-limit 500
+```
+
+## 11. Notes
+
+- In `DELIVERY_MODE=user`, target chat is marked unread after forwarding.
+- Edit sync works for messages that were forwarded while map file was maintained.
+- `MESSAGE_MAP_TTL_DAYS=0` disables cleanup.
+- Some media types may not support caption edits on Telegram side.
