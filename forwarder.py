@@ -38,6 +38,7 @@ class Settings:
     pm_alerts_enabled: bool
     pm_alert_target_chat: str | int | None
     pm_alert_cooldown_minutes: int
+    pm_alerts_lang: str
     pm_alerts_file: str
     pm_alerts_exclude_chats: list[str]
 
@@ -199,6 +200,19 @@ def _parse_delivery_mode(value: str | None) -> str:
     return mode
 
 
+def _parse_pm_alerts_lang(value: str | None) -> str:
+    raw = (value or "eng").strip().lower()
+    aliases = {
+        "ru": "ru",
+        "rus": "ru",
+        "eng": "eng",
+        "en": "eng",
+    }
+    if raw not in aliases:
+        raise ValueError("PM_ALERTS_LANG must be either 'ru' or 'eng'")
+    return aliases[raw]
+
+
 def _parse_refs_csv(value: str | None) -> list[str]:
     return [item.strip() for item in (value or "").split(",") if item.strip()]
 
@@ -327,6 +341,7 @@ def load_settings(require_routing: bool = True) -> Settings:
             default=60,
             var_name="PM_ALERT_COOLDOWN_MINUTES",
         ),
+        pm_alerts_lang=_parse_pm_alerts_lang(os.getenv("PM_ALERTS_LANG")),
         pm_alerts_file=os.getenv("PM_ALERTS_FILE", f"{session_name}_pm_alerts.json"),
         pm_alerts_exclude_chats=_parse_refs_csv(os.getenv("PM_ALERTS_EXCLUDE_CHATS")),
     )
@@ -689,9 +704,10 @@ async def main() -> None:
         logging.info("Per-chat sender filter enabled for %s chat(s)", len(chat_allowed_sender_ids))
     if settings.pm_alerts_enabled:
         logging.info(
-            "PM alerts enabled: target=%s, cooldown=%s minute(s)",
+            "PM alerts enabled: target=%s, cooldown=%s minute(s), lang=%s",
             _entity_label(pm_alert_target_entity),
             settings.pm_alert_cooldown_minutes,
+            settings.pm_alerts_lang,
         )
         if pm_alert_excluded_chat_ids:
             logging.info(
@@ -948,7 +964,10 @@ async def main() -> None:
 
         sender = await event.get_sender()
         sender_label = _entity_label(sender)
-        alert_text = f"{sender_label} написал(-а) новое сообщение."
+        if settings.pm_alerts_lang == "eng":
+            alert_text = f"{sender_label} wrote a new message"
+        else:
+            alert_text = f"{sender_label} написал(-а) новое сообщение"
 
         try:
             await bot_client.send_message(pm_alert_target_entity, alert_text, link_preview=False)

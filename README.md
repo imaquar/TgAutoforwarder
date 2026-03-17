@@ -9,7 +9,7 @@ A Python + Telethon service for automatically forwarding messages from multiple 
 - Preserves grouped media (albums) as grouped messages in the target chat.
 - In `DELIVERY_MODE=user`, marks the target dialog as unread after each forwarded message.
 - Syncs edits: when a source message is edited, forwarded message text/caption is updated (`user` and `bot` modes).
-- Optional PM alerts: on a new private message from a user, bot sends `<Name> написал(-а) новое сообщение.` with per-sender cooldown.
+- Optional PM alerts: on a new private message from a user, bot sends `<Name> wrote a new message` or `<Name> написал(-а) новое сообщение` with per-sender cooldown.
 - Supports login by phone code or by QR (`AUTH_MODE=qr`).
 
 ## Installation
@@ -44,6 +44,7 @@ MESSAGE_MAP_TTL_DAYS=7
 PM_ALERTS_ENABLED=false
 PM_ALERT_TARGET_CHAT=
 PM_ALERT_COOLDOWN_MINUTES=60
+PM_ALERTS_LANG=eng
 PM_ALERTS_FILE=autoforwarder_pm_alerts.json
 PM_ALERTS_EXCLUDE_CHATS=
 SKIP_OUTGOING=true
@@ -81,6 +82,7 @@ PM_ALERTS_ENABLED=true
 # optional, defaults to BOT_TARGET_CHAT or TARGET_CHAT
 PM_ALERT_TARGET_CHAT=-1001234567890
 PM_ALERT_COOLDOWN_MINUTES=60
+PM_ALERTS_LANG=eng
 PM_ALERTS_FILE=autoforwarder_pm_alerts.json
 # optional, skip alerts from these private chats/users
 PM_ALERTS_EXCLUDE_CHATS=@john,123456789
@@ -115,6 +117,7 @@ python forwarder.py --list-chats --list-limit 500
 - `PM alerts` always require `BOT_TOKEN`, even if `DELIVERY_MODE=user`.
 - `PM_ALERT_TARGET_CHAT` is optional; if empty, alerts are sent to `BOT_TARGET_CHAT` (or `TARGET_CHAT`).
 - `PM_ALERT_COOLDOWN_MINUTES` limits alerts to one per sender per cooldown window.
+- `PM_ALERTS_LANG` controls PM alert text language: `ru` or `eng` (default: `eng`).
 - `PM_ALERTS_FILE` persists PM alert cooldown state across restarts.
 - `PM_ALERTS_EXCLUDE_CHATS` skips PM alerts for selected private chats/users.
 
