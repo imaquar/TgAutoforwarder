@@ -965,9 +965,9 @@ async def main() -> None:
         sender = await event.get_sender()
         sender_label = _entity_label(sender)
         if settings.pm_alerts_lang == "eng":
-            alert_text = f"{sender_label} wrote a new message"
+            alert_text = f"{sender_label} sent a new message"
         else:
-            alert_text = f"{sender_label} написал(-а) новое сообщение"
+            alert_text = f"{sender_label} отправил(-а) новое сообщение"
 
         try:
             await bot_client.send_message(pm_alert_target_entity, alert_text, link_preview=False)

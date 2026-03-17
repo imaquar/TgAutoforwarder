@@ -9,7 +9,7 @@ A Python + Telethon service for automatically forwarding messages from multiple 
 - Preserves grouped media (albums) as grouped messages in the target chat.
 - In `DELIVERY_MODE=user`, marks the target dialog as unread after each forwarded message.
 - Syncs edits: when a source message is edited, forwarded message text/caption is updated (`user` and `bot` modes).
-- Optional PM alerts: on a new private message from a user, bot sends `<Name> wrote a new message` or `<Name> написал(-а) новое сообщение` with per-sender cooldown.
+- Optional PM alerts: on a new private message from a user, bot sends `<Name> sent a new message` or `<Name> отправил(-а) новое сообщение` with per-sender cooldown.
 - Supports login by phone code or by QR (`AUTH_MODE=qr`).
 
 ## Installation
