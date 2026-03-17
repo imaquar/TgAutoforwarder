@@ -45,9 +45,9 @@ TARGET_CHAT=@my_target_chat
 SKIP_OUTGOING=true
 ```
 
-`SOURCE_CHATS` and `TARGET_CHAT` support `@username`, links, and numeric IDs.
-`SKIP_OUTGOING=true` means your own outgoing messages from `SOURCE_CHATS` will be ignored.
-Set `SKIP_OUTGOING=false` if you want to forward your own messages too.
+- `SOURCE_CHATS` and `TARGET_CHAT` support `@username`, links, and numeric IDs.
+- `SKIP_OUTGOING=true` means your own outgoing messages from `SOURCE_CHATS` will be ignored.  
+- Set `SKIP_OUTGOING=false` if you want to forward your own messages too.
 
 ## 5. Delivery mode
 
