@@ -63,7 +63,6 @@ class Settings:
     email_smtp_password: str | None
     email_from: str | None
     email_to: list[str]
-    email_subject_prefix: str
 
 
 class MessageMapStore:
@@ -543,7 +542,6 @@ def load_settings(require_routing: bool = True) -> Settings:
     email_from = (os.getenv("EMAIL_FROM") or "").strip() or None
     email_to = _parse_emails_csv(os.getenv("EMAIL_TO"))
     email_use_tls = _parse_bool(os.getenv("EMAIL_USE_TLS"), default=True)
-    email_subject_prefix = (os.getenv("EMAIL_SUBJECT_PREFIX") or "[TgAutoforwarder]").strip() or "[TgAutoforwarder]"
 
     if not api_id_raw:
         raise ValueError("Environment variable API_ID is required")
@@ -681,7 +679,6 @@ def load_settings(require_routing: bool = True) -> Settings:
         email_smtp_password=email_smtp_password,
         email_from=email_from,
         email_to=email_to,
-        email_subject_prefix=email_subject_prefix,
     )
 
 
@@ -897,10 +894,6 @@ async def _get_reply_quote_text(message: types.Message) -> str | None:
     if reply_message.media is not None:
         return "[media message]"
     return None
-
-
-def _build_email_subject(prefix: str, source_title: str) -> str:
-    return f"{prefix} {source_title}".strip()
 
 
 async def _send_media_as_bot(
@@ -1383,7 +1376,7 @@ async def main() -> None:
                             return
 
                         await email_sender.send(
-                            subject=_build_email_subject(settings.email_subject_prefix, source_title),
+                            subject=source_title,
                             body=plain_email_text,
                             attachments=attachments,
                         )
@@ -1541,7 +1534,7 @@ async def main() -> None:
                             attachments.append((downloaded, os.path.basename(downloaded)))
 
                         await email_sender.send(
-                            subject=_build_email_subject(settings.email_subject_prefix, source_title),
+                            subject=source_title,
                             body=album_body,
                             attachments=attachments,
                         )
@@ -1614,8 +1607,10 @@ async def main() -> None:
         sender_label = _entity_label(sender)
         if settings.pm_alerts_lang == "eng":
             alert_text = f"{sender_label} sent a new message"
+            email_alert_text = "Sent a new message"
         else:
             alert_text = f"{sender_label} отправил(-а) новое сообщение"
+            email_alert_text = "Отправил(-а) новое сообщение"
         telegram_sent = False
         email_sent = False
 
@@ -1636,8 +1631,8 @@ async def main() -> None:
         if settings.email_pm_alerts_enabled and email_sender is not None:
             try:
                 await email_sender.send(
-                    subject=_build_email_subject(settings.email_subject_prefix, "PM Alert"),
-                    body=alert_text,
+                    subject=sender_label,
+                    body=email_alert_text,
                 )
                 email_sent = True
             except Exception as exc:

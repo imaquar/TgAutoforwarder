@@ -165,13 +165,14 @@ EMAIL_SMTP_USERNAME=
 EMAIL_SMTP_PASSWORD=
 EMAIL_FROM=
 EMAIL_TO=me@example.com,backup@example.com
-EMAIL_SUBJECT_PREFIX=[TgAutoforwarder]
 ```
 
 - `EMAIL_FORWARDING_ENABLED`: send forwarded source messages to email.
 - `EMAIL_PM_ALERTS_ENABLED`: send PM alerts to email.
 - `EMAIL_PM_ALERTS_ENABLED` requires `PM_ALERTS_ENABLED=true`.
 - If at least one email flag is `true`, SMTP settings and `EMAIL_TO` are required.
+- Email subject for forwarding is the source chat title.
+- Email subject for PM alerts is the sender name.
 
 ## 10. Run
 
