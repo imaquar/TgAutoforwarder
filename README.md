@@ -6,6 +6,7 @@ Telegram autoforwarder on Python + Telethon.
 - Listens for new messages in `SOURCE_CHATS`.
 - Sends them to `TARGET_CHAT` from your user account or from a bot.
 - Adds a `[Source Chat Name]` prefix to message text/caption.
+- For reply messages, includes quoted original message under the `[Source Chat Name]` prefix.
 - Preserves grouped media (albums) as grouped messages in target chat.
 - In `DELIVERY_MODE=user`, marks target dialog as unread after forwarding.
 - Syncs edits: when source message is edited, forwarded text/caption is updated (`user` and `bot` modes).

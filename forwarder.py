@@ -631,17 +631,48 @@ def _build_message_url(chat_entity: Any, message_id: int) -> str | None:
     return None
 
 
-def _format_prefixed_html(source_title: str, text: str, message_url: str | None = None) -> str:
+def _format_prefixed_html(
+    source_title: str,
+    text: str,
+    message_url: str | None = None,
+    quote_text: str | None = None,
+) -> str:
     escaped_prefix = html.escape(f"[{source_title}]")
     prefix_markup = f"<b>{escaped_prefix}</b>"
     if message_url:
         escaped_url = html.escape(message_url, quote=True)
         prefix_markup = f'<a href="{escaped_url}">{prefix_markup}</a>'
 
+    sections: list[str] = [prefix_markup]
+    stripped_quote_text = (quote_text or "").strip()
+    if stripped_quote_text:
+        sections.append(f"<blockquote>{html.escape(stripped_quote_text)}</blockquote>")
+
     stripped_text = text.strip()
     if stripped_text:
-        return f"{prefix_markup}\n\n{html.escape(stripped_text)}"
-    return prefix_markup
+        sections.append(html.escape(stripped_text))
+
+    return "\n\n".join(sections)
+
+
+async def _get_reply_quote_text(message: types.Message) -> str | None:
+    reply_to_message_id = getattr(message, "reply_to_msg_id", None)
+    if reply_to_message_id is None:
+        return None
+
+    try:
+        reply_message = await message.get_reply_message()
+    except Exception:
+        return None
+    if reply_message is None:
+        return None
+
+    reply_text = (reply_message.message or "").strip()
+    if reply_text:
+        return reply_text
+    if reply_message.media is not None:
+        return "[media message]"
+    return None
 
 
 async def _send_media_as_bot(
@@ -976,8 +1007,14 @@ async def main() -> None:
             source = await event.get_chat()
             source_title = _entity_label(source)
             original_text = (message.message or "").strip()
+            reply_quote_text = await _get_reply_quote_text(message)
             message_url = _build_message_url(source, message.id)
-            formatted_text = _format_prefixed_html(source_title, original_text, message_url=message_url)
+            formatted_text = _format_prefixed_html(
+                source_title,
+                original_text,
+                message_url=message_url,
+                quote_text=reply_quote_text,
+            )
             formatted_prefix_only = _format_prefixed_html(source_title, "", message_url=message_url)
             sent_target_message_id: int | None = None
 
@@ -1071,12 +1108,20 @@ async def main() -> None:
             source = await event.get_chat()
             source_title = _entity_label(source)
             first_message_url = _build_message_url(source, album_messages[0].id)
+            first_reply_quote_text = await _get_reply_quote_text(album_messages[0])
 
             captions: list[str] = []
             for idx, message in enumerate(album_messages):
                 text = (message.message or "").strip()
                 if idx == 0:
-                    captions.append(_format_prefixed_html(source_title, text, message_url=first_message_url))
+                    captions.append(
+                        _format_prefixed_html(
+                            source_title,
+                            text,
+                            message_url=first_message_url,
+                            quote_text=first_reply_quote_text,
+                        )
+                    )
                 else:
                     captions.append(html.escape(text) if text else "")
 
@@ -1230,8 +1275,14 @@ async def main() -> None:
             source = await event.get_chat()
             source_title = _entity_label(source)
             original_text = (message.message or "").strip()
+            reply_quote_text = await _get_reply_quote_text(message)
             message_url = _build_message_url(source, message.id)
-            formatted_text = _format_prefixed_html(source_title, original_text, message_url=message_url)
+            formatted_text = _format_prefixed_html(
+                source_title,
+                original_text,
+                message_url=message_url,
+                quote_text=reply_quote_text,
+            )
 
             try:
                 if settings.delivery_mode == "bot":
