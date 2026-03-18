@@ -186,6 +186,8 @@ EMAIL_TO=me@example.com,backup@example.com
 - Email subject for forwarding is the source chat title.
 - Email subject for PM alert batch is the sender name.
 - Email body for PM alert batch contains all buffered messages, one message per line (no empty lines between messages).
+- PM alert batch placeholders: sticker -> `[sticker]`, voice/circle -> `[voice message]`.
+- PM alert batch attaches photo/file media to the email when possible.
 - Forwarding email body contains quote/text content; source message link is placed at the end.
 
 ## 10. Run

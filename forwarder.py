@@ -366,24 +366,57 @@ class EmailPmBatchStore:
                     sender_label = value.get("sender_label")
                     due_at = value.get("due_at")
                     updated_at = value.get("updated_at")
-                    lines = value.get("lines")
+                    items = value.get("items")
                     if (
                         isinstance(sender_label, str)
                         and isinstance(due_at, int)
                         and isinstance(updated_at, int)
-                        and isinstance(lines, list)
                     ):
-                        normalized_lines = [
-                            str(item).strip()
-                            for item in lines
-                            if str(item).strip()
-                        ]
-                        if normalized_lines:
+                        normalized_items: list[dict[str, Any]] = []
+                        if isinstance(items, list):
+                            for item in items:
+                                if not isinstance(item, dict):
+                                    continue
+                                chat_id = item.get("chat_id")
+                                message_id = item.get("message_id")
+                                line = item.get("line")
+                                attach_media = item.get("attach_media", False)
+                                if (
+                                    isinstance(chat_id, int)
+                                    and isinstance(message_id, int)
+                                    and isinstance(line, str)
+                                    and line.strip()
+                                ):
+                                    normalized_items.append(
+                                        {
+                                            "chat_id": chat_id,
+                                            "message_id": message_id,
+                                            "line": line.strip(),
+                                            "attach_media": bool(attach_media),
+                                        }
+                                    )
+
+                        # Backward compatibility for old format with "lines".
+                        if not normalized_items:
+                            lines = value.get("lines")
+                            if isinstance(lines, list):
+                                normalized_items = [
+                                    {
+                                        "chat_id": 0,
+                                        "message_id": 0,
+                                        "line": str(item).strip(),
+                                        "attach_media": False,
+                                    }
+                                    for item in lines
+                                    if str(item).strip()
+                                ]
+
+                        if normalized_items:
                             normalized[str(sender_id)] = {
                                 "sender_label": sender_label.strip() or str(sender_id),
                                 "due_at": due_at,
                                 "updated_at": updated_at,
-                                "lines": normalized_lines,
+                                "items": normalized_items,
                             }
                 self._data = normalized
                 self._prune_old_records_locked()
@@ -413,51 +446,101 @@ class EmailPmBatchStore:
         *,
         sender_id: int,
         sender_label: str,
+        chat_id: int,
+        message_id: int,
         line: str,
+        attach_media: bool,
         batch_seconds: int,
     ) -> int:
         async with self._lock:
             now = int(time.time())
             sender_key = str(sender_id)
             existing = self._data.get(sender_key)
-            lines: list[str]
-            if existing and isinstance(existing.get("lines"), list):
-                lines = [str(item).strip() for item in existing["lines"] if str(item).strip()]
+            items: list[dict[str, Any]]
+            if existing and isinstance(existing.get("items"), list):
+                items = []
+                for item in existing["items"]:
+                    if not isinstance(item, dict):
+                        continue
+                    existing_chat_id = item.get("chat_id")
+                    existing_message_id = item.get("message_id")
+                    existing_line = item.get("line")
+                    if (
+                        isinstance(existing_chat_id, int)
+                        and isinstance(existing_message_id, int)
+                        and isinstance(existing_line, str)
+                        and existing_line.strip()
+                    ):
+                        items.append(
+                            {
+                                "chat_id": existing_chat_id,
+                                "message_id": existing_message_id,
+                                "line": existing_line.strip(),
+                                "attach_media": bool(item.get("attach_media", False)),
+                            }
+                        )
             else:
-                lines = []
+                items = []
             if line.strip():
-                lines.append(line.strip())
+                items.append(
+                    {
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "line": line.strip(),
+                        "attach_media": attach_media,
+                    }
+                )
             due_at = now + batch_seconds
             self._data[sender_key] = {
                 "sender_label": sender_label.strip() or sender_key,
                 "due_at": due_at,
                 "updated_at": now,
-                "lines": lines,
+                "items": items,
             }
             self._prune_old_records_locked()
             self._save()
             return due_at
 
-    async def get_due_entries(self, now_ts: int) -> list[tuple[int, str, list[str]]]:
+    async def get_due_entries(self, now_ts: int) -> list[tuple[int, str, list[dict[str, Any]]]]:
         async with self._lock:
-            result: list[tuple[int, str, list[str]]] = []
+            result: list[tuple[int, str, list[dict[str, Any]]]] = []
             for sender_key, value in self._data.items():
                 due_at = value.get("due_at")
                 sender_label = value.get("sender_label")
-                lines = value.get("lines")
+                items = value.get("items")
                 if (
                     isinstance(due_at, int)
                     and due_at <= now_ts
                     and isinstance(sender_label, str)
-                    and isinstance(lines, list)
+                    and isinstance(items, list)
                 ):
-                    normalized_lines = [str(item).strip() for item in lines if str(item).strip()]
-                    if normalized_lines:
+                    normalized_items: list[dict[str, Any]] = []
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        chat_id = item.get("chat_id")
+                        message_id = item.get("message_id")
+                        line = item.get("line")
+                        if (
+                            isinstance(chat_id, int)
+                            and isinstance(message_id, int)
+                            and isinstance(line, str)
+                            and line.strip()
+                        ):
+                            normalized_items.append(
+                                {
+                                    "chat_id": chat_id,
+                                    "message_id": message_id,
+                                    "line": line.strip(),
+                                    "attach_media": bool(item.get("attach_media", False)),
+                                }
+                            )
+                    if normalized_items:
                         try:
                             sender_id = int(sender_key)
                         except ValueError:
                             continue
-                        result.append((sender_id, sender_label, normalized_lines))
+                        result.append((sender_id, sender_label, normalized_items))
             return result
 
     async def remove(self, sender_id: int) -> None:
@@ -1038,13 +1121,29 @@ def _format_email_forward_plain(
     return "\n\n".join(sections)
 
 
-def _format_pm_alert_email_line(message: types.Message) -> str:
+def _format_pm_alert_email_item(message: types.Message) -> tuple[str, bool]:
     raw_text = (message.message or "").strip()
-    if raw_text:
-        return " ".join(raw_text.splitlines()).strip()
+    normalized_text = " ".join(raw_text.splitlines()).strip() if raw_text else ""
+
+    is_sticker = bool(getattr(message, "sticker", False))
+    is_voice = bool(getattr(message, "voice", False))
+    is_video_note = bool(getattr(message, "video_note", False))
+    has_photo = getattr(message, "photo", None) is not None
+    has_document = getattr(message, "document", None) is not None
+
+    if is_sticker:
+        return ("[sticker]", False)
+    if is_voice or is_video_note:
+        return ("[voice message]", False)
+    if has_photo:
+        return (normalized_text or "[photo]", True)
+    if has_document:
+        return (normalized_text or "[file]", True)
     if message.media is not None:
-        return "[media message]"
-    return "[empty message]"
+        return (normalized_text or "[media message]", False)
+    if normalized_text:
+        return (normalized_text, False)
+    return ("[empty message]", False)
 
 
 async def _get_reply_quote_text(message: types.Message) -> str | None:
@@ -1229,6 +1328,7 @@ async def _pm_alerts_auto_delete_loop(
 
 async def _email_pm_alerts_batch_loop(
     *,
+    client: TelegramClient,
     email_sender: EmailSender,
     batch_store: EmailPmBatchStore,
 ) -> None:
@@ -1240,18 +1340,49 @@ async def _email_pm_alerts_batch_loop(
         now_ts = int(time.time())
         due_entries = await batch_store.get_due_entries(now_ts)
         if due_entries:
-            for sender_id, sender_label, lines in due_entries:
-                body = "\n".join(lines)
+            for sender_id, sender_label, items in due_entries:
+                body_lines = [str(item["line"]) for item in items]
+                body = "\n".join(body_lines)
                 try:
-                    await email_sender.send(
-                        subject=sender_label,
-                        body=body,
-                    )
+                    attachments: list[tuple[str, str]] = []
+                    with tempfile.TemporaryDirectory(prefix="tgfwd_pm_email_batch_") as temp_dir:
+                        for idx, item in enumerate(items):
+                            if not bool(item.get("attach_media", False)):
+                                continue
+                            chat_id = int(item.get("chat_id", 0))
+                            message_id = int(item.get("message_id", 0))
+                            if chat_id == 0 or message_id == 0:
+                                continue
+                            try:
+                                media_message = await client.get_messages(chat_id, ids=message_id)
+                                if isinstance(media_message, list):
+                                    media_message = media_message[0] if media_message else None
+                                if media_message is None or getattr(media_message, "media", None) is None:
+                                    continue
+                                safe_name = _safe_media_filename(media_message)
+                                file_hint = os.path.join(temp_dir, f"{idx:02d}_{safe_name}")
+                                downloaded = await _download_media_to_path(client, media_message, file_hint)
+                                attachments.append((downloaded, os.path.basename(downloaded)))
+                            except Exception as exc:
+                                logging.exception(
+                                    "Failed to attach PM media %s/%s for %s: %s",
+                                    chat_id,
+                                    message_id,
+                                    sender_label,
+                                    exc,
+                                )
+
+                        await email_sender.send(
+                            subject=sender_label,
+                            body=body,
+                            attachments=attachments,
+                        )
                     await batch_store.remove(sender_id)
                     logging.info(
-                        "Sent batched PM alert email for %s (%s message lines)",
+                        "Sent batched PM alert email for %s (%s lines, %s attachment(s))",
                         sender_label,
-                        len(lines),
+                        len(body_lines),
+                        len(attachments),
                     )
                 except Exception as exc:
                     logging.exception(
@@ -1364,6 +1495,7 @@ async def main() -> None:
         email_pm_alerts_batch_store = EmailPmBatchStore(settings.email_pm_alerts_batch_file)
         email_pm_alerts_batch_task = asyncio.create_task(
             _email_pm_alerts_batch_loop(
+                client=client,
                 email_sender=email_sender,
                 batch_store=email_pm_alerts_batch_store,
             )
@@ -1869,11 +2001,17 @@ async def main() -> None:
 
         if settings.email_pm_alerts_batch_enabled and email_pm_alerts_batch_store is not None:
             try:
-                line = _format_pm_alert_email_line(message)
+                line, attach_media = _format_pm_alert_email_item(message)
+                chat_id_for_batch = event.chat_id if event.chat_id is not None else event.sender_id
+                if chat_id_for_batch is None:
+                    return
                 due_at = await email_pm_alerts_batch_store.add_message(
                     sender_id=event.sender_id,
                     sender_label=sender_label,
+                    chat_id=chat_id_for_batch,
+                    message_id=message.id,
                     line=line,
+                    attach_media=attach_media,
                     batch_seconds=settings.email_pm_alerts_batch_minutes * 60,
                 )
                 email_queued = True
