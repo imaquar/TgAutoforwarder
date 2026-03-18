@@ -854,16 +854,12 @@ def _format_prefixed_html(
     return "\n\n".join(sections)
 
 
-def _format_prefixed_plain(
-    source_title: str,
+def _format_email_forward_plain(
     text: str,
     quote_text: str | None = None,
     message_url: str | None = None,
 ) -> str:
-    sections: list[str] = [f"[{source_title}]"]
-    if message_url:
-        sections.append(message_url)
-
+    sections: list[str] = []
     stripped_quote_text = (quote_text or "").strip()
     if stripped_quote_text:
         quoted_lines = "\n".join(f"> {line}" for line in stripped_quote_text.splitlines())
@@ -872,6 +868,9 @@ def _format_prefixed_plain(
     stripped_text = text.strip()
     if stripped_text:
         sections.append(stripped_text)
+
+    if message_url:
+        sections.append(message_url)
 
     return "\n\n".join(sections)
 
@@ -1278,8 +1277,7 @@ async def main() -> None:
                 quote_text=reply_quote_text,
             )
             formatted_prefix_only = _format_prefixed_html(source_title, "", message_url=message_url)
-            plain_email_text = _format_prefixed_plain(
-                source_title,
+            plain_email_text = _format_email_forward_plain(
                 original_text,
                 quote_text=reply_quote_text,
                 message_url=message_url,
@@ -1512,8 +1510,7 @@ async def main() -> None:
                 try:
                     body_parts: list[str] = []
                     body_parts.append(
-                        _format_prefixed_plain(
-                            source_title,
+                        _format_email_forward_plain(
                             (album_messages[0].message or "").strip(),
                             quote_text=first_reply_quote_text,
                             message_url=first_message_url,
