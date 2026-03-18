@@ -132,6 +132,7 @@ PM_ALERTS_EXCLUDE_CHATS=@john,123456789
 - `PM_ALERT_MIN_SILENCE_AFTER_MY_MESSAGE_MINUTES`: PM alert is sent only if you did not message that chat for at least N minutes.
 - `PM_ALERT_MY_ACTIVITY_FILE`: file with timestamps of your own PM activity.
 - `PM_ALERTS_AUTO_DELETE_ENABLED`: enable scheduled deletion of PM alert messages.
+- `PM_ALERTS_AUTO_DELETE_ENABLED` requires `PM_ALERTS_ENABLED=true`. If `PM_ALERTS_ENABLED=false`, keep auto-delete disabled.
 - `PM_ALERTS_AUTO_DELETE_TIME`: daily delete time (`HH:MM`, server local time), for example `05:00`.
 - `PM_ALERTS_AUTO_DELETE_AFTER_HOURS`: delete alerts older than this number of hours.
 - Maximum for `PM_ALERTS_AUTO_DELETE_AFTER_HOURS` is `48` hours.
