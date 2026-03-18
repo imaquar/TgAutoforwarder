@@ -50,7 +50,7 @@ SKIP_OUTGOING=true
 
 - `SOURCE_CHATS` and `TARGET_CHAT` support `@username`, links, and numeric IDs.
 - `FORWARDING_ENABLED=false` disables forwarding from `SOURCE_CHATS` completely.
-- If `FORWARDING_ENABLED=false`, enable `PM_ALERTS_ENABLED=true` to keep script active.
+- If `FORWARDING_ENABLED=false`, keep at least one other delivery channel enabled (`EMAIL_FORWARDING_ENABLED`, `PM_ALERTS_ENABLED`, or `EMAIL_PM_ALERTS_ENABLED`).
 - `SKIP_OUTGOING=true` means your own outgoing messages from `SOURCE_CHATS` will be ignored.  
 - Set `SKIP_OUTGOING=false` if you want to forward your own messages too.
 
@@ -104,7 +104,7 @@ CHAT_ALLOWED_SENDERS={"@work_chat":["@boss","123456789"],"-1001234567890":["@tea
 
 ```env
 PM_ALERTS_ENABLED=true
-# required for PM alerts in any mode
+# required when PM_ALERTS_ENABLED=true
 BOT_TOKEN=123456:your_bot_token
 # optional, default is BOT_TARGET_CHAT or TARGET_CHAT
 PM_ALERT_TARGET_CHAT=
@@ -123,7 +123,7 @@ PM_ALERTS_EXCLUDE_CHATS=@john,123456789
 ```
 
 - `PM_ALERTS_ENABLED`: turns private-message alerts on/off.
-- `PM_ALERT_TARGET_CHAT`: where alerts are sent. If empty, fallback is `BOT_TARGET_CHAT` then `TARGET_CHAT`.
+- `PM_ALERT_TARGET_CHAT`: where Telegram PM alerts are sent. If empty, fallback is `BOT_TARGET_CHAT` then `TARGET_CHAT`.
 - `PM_ALERT_COOLDOWN_MINUTES`: minimum interval between alerts from the same sender.
 - Example: `60` means one alert per sender per 60 minutes, `0` disables cooldown.
 - `PM_ALERTS_LANG`: alert text language (`eng` or `ru`).
@@ -149,6 +149,12 @@ FORWARDING_ENABLED=false
 PM_ALERTS_ENABLED=true
 ```
 
+If you want PM alerts only by email (without Telegram PM alerts):
+```env
+PM_ALERTS_ENABLED=false
+EMAIL_PM_ALERTS_ENABLED=true
+```
+
 ## 9. Optional email delivery
 
 ```env
@@ -169,7 +175,7 @@ EMAIL_TO=me@example.com,backup@example.com
 
 - `EMAIL_FORWARDING_ENABLED`: send forwarded source messages to email.
 - `EMAIL_PM_ALERTS_ENABLED`: send PM alerts to email.
-- `EMAIL_PM_ALERTS_ENABLED` requires `PM_ALERTS_ENABLED=true`.
+- PM alerts can be email-only with `PM_ALERTS_ENABLED=false` and `EMAIL_PM_ALERTS_ENABLED=true`.
 - If at least one email flag is `true`, SMTP settings and `EMAIL_TO` are required.
 - Email subject for forwarding is the source chat title.
 - Email subject for PM alerts is the sender name.

@@ -582,6 +582,7 @@ def load_settings(require_routing: bool = True) -> Settings:
     bot_target_chat_ref: str | int | None = _coerce_ref(bot_target_chat_raw) if bot_target_chat_raw else None
     pm_alert_target_chat_ref: str | int | None = None
     source_delivery_enabled = forwarding_enabled or email_forwarding_enabled
+    pm_alerts_active = pm_alerts_enabled or email_pm_alerts_enabled
     if require_routing and source_delivery_enabled:
         if not source_chats:
             raise ValueError("Environment variable SOURCE_CHATS is required")
@@ -589,15 +590,13 @@ def load_settings(require_routing: bool = True) -> Settings:
         if target_chat_ref is None:
             raise ValueError("Environment variable TARGET_CHAT is required")
 
-    if require_routing and not source_delivery_enabled and not pm_alerts_enabled and not email_pm_alerts_enabled:
+    if require_routing and not source_delivery_enabled and not pm_alerts_active:
         raise ValueError("Nothing to run: enable forwarding, PM alerts, or email delivery")
 
     if pm_alerts_auto_delete_enabled and not pm_alerts_enabled:
         raise ValueError("PM_ALERTS_AUTO_DELETE_ENABLED=true requires PM_ALERTS_ENABLED=true")
-    if pm_alert_require_my_silence and not pm_alerts_enabled:
-        raise ValueError("PM_ALERT_REQUIRE_MY_SILENCE=true requires PM_ALERTS_ENABLED=true")
-    if email_pm_alerts_enabled and not pm_alerts_enabled:
-        raise ValueError("EMAIL_PM_ALERTS_ENABLED=true requires PM_ALERTS_ENABLED=true")
+    if pm_alert_require_my_silence and not pm_alerts_active:
+        raise ValueError("PM_ALERT_REQUIRE_MY_SILENCE=true requires PM alerts delivery enabled")
 
     if pm_alerts_auto_delete_after_hours > 48:
         raise ValueError("PM_ALERTS_AUTO_DELETE_AFTER_HOURS cannot be greater than 48")
@@ -606,7 +605,10 @@ def load_settings(require_routing: bool = True) -> Settings:
 
     if (forwarding_enabled and delivery_mode == "bot") or pm_alerts_enabled:
         if not bot_token:
-            raise ValueError("Environment variable BOT_TOKEN is required when DELIVERY_MODE=bot and forwarding is enabled, or when PM_ALERTS_ENABLED=true")
+            raise ValueError(
+                "Environment variable BOT_TOKEN is required when DELIVERY_MODE=bot and forwarding is enabled, "
+                "or when PM alerts Telegram delivery is enabled (PM_ALERTS_ENABLED=true)"
+            )
 
     if email_smtp_port < 1:
         raise ValueError("EMAIL_SMTP_PORT must be a positive integer")
@@ -1058,6 +1060,7 @@ async def _pm_alerts_auto_delete_loop(
 async def main() -> None:
     args = _parse_args()
     settings = load_settings(require_routing=not args.list_chats)
+    pm_alerts_active = settings.pm_alerts_enabled or settings.email_pm_alerts_enabled
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
@@ -1117,9 +1120,10 @@ async def main() -> None:
             active_message_map_file,
             ttl_days=settings.message_map_ttl_days,
         )
-    if settings.pm_alerts_enabled:
-        pm_alert_target_entity = await bot_client.get_entity(settings.pm_alert_target_chat)
-        pm_alert_target_peer_id = get_peer_id(pm_alert_target_entity)
+    if pm_alerts_active:
+        if settings.pm_alerts_enabled:
+            pm_alert_target_entity = await bot_client.get_entity(settings.pm_alert_target_chat)
+            pm_alert_target_peer_id = get_peer_id(pm_alert_target_entity)
         pm_alerts_store = PmAlertCooldownStore(settings.pm_alerts_file)
         if settings.pm_alert_require_my_silence:
             pm_alert_my_activity_store = PmAlertMyActivityStore(settings.pm_alert_my_activity_file)
@@ -1208,10 +1212,16 @@ async def main() -> None:
         logging.info("Email forwarding enabled: to=%s", ", ".join(settings.email_to))
     if settings.email_pm_alerts_enabled:
         logging.info("PM alerts email delivery enabled: to=%s", ", ".join(settings.email_to))
-    if settings.pm_alerts_enabled:
+    if pm_alerts_active:
+        if settings.pm_alerts_enabled:
+            logging.info(
+                "PM alerts Telegram delivery enabled: target=%s",
+                _entity_label(pm_alert_target_entity),
+            )
+        else:
+            logging.info("PM alerts Telegram delivery disabled (PM_ALERTS_ENABLED=false).")
         logging.info(
-            "PM alerts enabled: target=%s, cooldown=%s minute(s), lang=%s",
-            _entity_label(pm_alert_target_entity),
+            "PM alerts enabled: cooldown=%s minute(s), lang=%s",
             settings.pm_alert_cooldown_minutes,
             settings.pm_alerts_lang,
         )
@@ -1549,7 +1559,7 @@ async def main() -> None:
 
     @client.on(events.NewMessage(outgoing=True))
     async def pm_my_activity_handler(event: events.NewMessage.Event) -> None:
-        if not settings.pm_alerts_enabled or not settings.pm_alert_require_my_silence:
+        if not pm_alerts_active or not settings.pm_alert_require_my_silence:
             return
         if pm_alert_my_activity_store is None:
             return
@@ -1566,7 +1576,7 @@ async def main() -> None:
 
     @client.on(events.NewMessage(incoming=True))
     async def pm_alerts_handler(event: events.NewMessage.Event) -> None:
-        if not settings.pm_alerts_enabled or pm_alerts_store is None:
+        if not pm_alerts_active or pm_alerts_store is None:
             return
         if not event.is_private or event.out:
             return
@@ -1611,19 +1621,20 @@ async def main() -> None:
         telegram_sent = False
         email_sent = False
 
-        try:
-            sent_message = await bot_client.send_message(pm_alert_target_entity, alert_text, link_preview=False)
-            sent_message_id = _extract_message_id(sent_message)
-            if (
-                settings.pm_alerts_auto_delete_enabled
-                and pm_alert_messages_store is not None
-                and pm_alert_target_peer_id is not None
-                and sent_message_id is not None
-            ):
-                await pm_alert_messages_store.add(pm_alert_target_peer_id, sent_message_id)
-            telegram_sent = True
-        except Exception as exc:
-            logging.exception("Failed to send PM alert to Telegram for %s: %s", sender_label, exc)
+        if settings.pm_alerts_enabled:
+            try:
+                sent_message = await bot_client.send_message(pm_alert_target_entity, alert_text, link_preview=False)
+                sent_message_id = _extract_message_id(sent_message)
+                if (
+                    settings.pm_alerts_auto_delete_enabled
+                    and pm_alert_messages_store is not None
+                    and pm_alert_target_peer_id is not None
+                    and sent_message_id is not None
+                ):
+                    await pm_alert_messages_store.add(pm_alert_target_peer_id, sent_message_id)
+                telegram_sent = True
+            except Exception as exc:
+                logging.exception("Failed to send PM alert to Telegram for %s: %s", sender_label, exc)
 
         if settings.email_pm_alerts_enabled and email_sender is not None:
             try:
