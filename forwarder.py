@@ -55,7 +55,9 @@ class Settings:
     pm_alerts_auto_delete_after_hours: int
     pm_alerts_auto_delete_file: str
     email_forwarding_enabled: bool
-    email_pm_alerts_enabled: bool
+    email_pm_alerts_batch_enabled: bool
+    email_pm_alerts_batch_minutes: int
+    email_pm_alerts_batch_file: str
     email_smtp_host: str | None
     email_smtp_port: int
     email_use_tls: bool
@@ -341,6 +343,153 @@ class PmAlertMessagesStore:
             self._save()
 
 
+class EmailPmBatchStore:
+    def __init__(self, path: str, keep_days: int = 7) -> None:
+        self.path = path
+        self.keep_seconds = keep_days * 24 * 60 * 60
+        self._lock = asyncio.Lock()
+        self._data: dict[str, dict[str, Any]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not os.path.exists(self.path):
+            return
+
+        try:
+            with open(self.path, "r", encoding="utf-8") as file_obj:
+                payload = json.load(file_obj)
+            if isinstance(payload, dict):
+                normalized: dict[str, dict[str, Any]] = {}
+                for sender_id, value in payload.items():
+                    if not isinstance(value, dict):
+                        continue
+                    sender_label = value.get("sender_label")
+                    due_at = value.get("due_at")
+                    updated_at = value.get("updated_at")
+                    lines = value.get("lines")
+                    if (
+                        isinstance(sender_label, str)
+                        and isinstance(due_at, int)
+                        and isinstance(updated_at, int)
+                        and isinstance(lines, list)
+                    ):
+                        normalized_lines = [
+                            str(item).strip()
+                            for item in lines
+                            if str(item).strip()
+                        ]
+                        if normalized_lines:
+                            normalized[str(sender_id)] = {
+                                "sender_label": sender_label.strip() or str(sender_id),
+                                "due_at": due_at,
+                                "updated_at": updated_at,
+                                "lines": normalized_lines,
+                            }
+                self._data = normalized
+                self._prune_old_records_locked()
+                self._save()
+        except Exception as exc:
+            logging.warning("Failed to load email PM alerts batch file %s: %s", self.path, exc)
+            self._data = {}
+
+    def _save(self) -> None:
+        temp_path = f"{self.path}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as file_obj:
+            json.dump(self._data, file_obj)
+        os.replace(temp_path, self.path)
+
+    def _prune_old_records_locked(self) -> None:
+        cutoff = int(time.time()) - self.keep_seconds
+        keys_to_remove = [
+            key
+            for key, value in self._data.items()
+            if int(value.get("updated_at", 0)) < cutoff
+        ]
+        for key in keys_to_remove:
+            self._data.pop(key, None)
+
+    async def add_message(
+        self,
+        *,
+        sender_id: int,
+        sender_label: str,
+        line: str,
+        batch_seconds: int,
+    ) -> int:
+        async with self._lock:
+            now = int(time.time())
+            sender_key = str(sender_id)
+            existing = self._data.get(sender_key)
+            lines: list[str]
+            if existing and isinstance(existing.get("lines"), list):
+                lines = [str(item).strip() for item in existing["lines"] if str(item).strip()]
+            else:
+                lines = []
+            if line.strip():
+                lines.append(line.strip())
+            due_at = now + batch_seconds
+            self._data[sender_key] = {
+                "sender_label": sender_label.strip() or sender_key,
+                "due_at": due_at,
+                "updated_at": now,
+                "lines": lines,
+            }
+            self._prune_old_records_locked()
+            self._save()
+            return due_at
+
+    async def get_due_entries(self, now_ts: int) -> list[tuple[int, str, list[str]]]:
+        async with self._lock:
+            result: list[tuple[int, str, list[str]]] = []
+            for sender_key, value in self._data.items():
+                due_at = value.get("due_at")
+                sender_label = value.get("sender_label")
+                lines = value.get("lines")
+                if (
+                    isinstance(due_at, int)
+                    and due_at <= now_ts
+                    and isinstance(sender_label, str)
+                    and isinstance(lines, list)
+                ):
+                    normalized_lines = [str(item).strip() for item in lines if str(item).strip()]
+                    if normalized_lines:
+                        try:
+                            sender_id = int(sender_key)
+                        except ValueError:
+                            continue
+                        result.append((sender_id, sender_label, normalized_lines))
+            return result
+
+    async def remove(self, sender_id: int) -> None:
+        async with self._lock:
+            self._data.pop(str(sender_id), None)
+            self._prune_old_records_locked()
+            self._save()
+
+    async def postpone(self, sender_id: int, seconds: int) -> None:
+        async with self._lock:
+            key = str(sender_id)
+            value = self._data.get(key)
+            if not value:
+                return
+            now = int(time.time())
+            value["due_at"] = now + max(1, seconds)
+            value["updated_at"] = now
+            self._prune_old_records_locked()
+            self._save()
+
+    async def next_due_ts(self) -> int | None:
+        async with self._lock:
+            due_candidates = [
+                int(value["due_at"])
+                for value in self._data.values()
+                if isinstance(value, dict) and isinstance(value.get("due_at"), int)
+            ]
+            if not due_candidates:
+                return None
+            return min(due_candidates)
+
+
 class EmailSender:
     def __init__(
         self,
@@ -535,7 +684,7 @@ def load_settings(require_routing: bool = True) -> Settings:
     pm_alert_require_my_silence = _parse_bool(os.getenv("PM_ALERT_REQUIRE_MY_SILENCE"), default=False)
     pm_alerts_auto_delete_enabled = _parse_bool(os.getenv("PM_ALERTS_AUTO_DELETE_ENABLED"), default=False)
     email_forwarding_enabled = _parse_bool(os.getenv("EMAIL_FORWARDING_ENABLED"), default=False)
-    email_pm_alerts_enabled = _parse_bool(os.getenv("EMAIL_PM_ALERTS_ENABLED"), default=False)
+    email_pm_alerts_batch_enabled = _parse_bool(os.getenv("EMAIL_PM_ALERTS_BATCH_ENABLED"), default=False)
     email_smtp_host = (os.getenv("EMAIL_SMTP_HOST") or "").strip() or None
     email_smtp_username = (os.getenv("EMAIL_SMTP_USERNAME") or "").strip() or None
     email_smtp_password = (os.getenv("EMAIL_SMTP_PASSWORD") or "").strip() or None
@@ -571,6 +720,11 @@ def load_settings(require_routing: bool = True) -> Settings:
         default=30,
         var_name="PM_ALERT_MIN_SILENCE_AFTER_MY_MESSAGE_MINUTES",
     )
+    email_pm_alerts_batch_minutes = _parse_non_negative_int(
+        os.getenv("EMAIL_PM_ALERTS_BATCH_MINUTES"),
+        default=10,
+        var_name="EMAIL_PM_ALERTS_BATCH_MINUTES",
+    )
     email_smtp_port = _parse_non_negative_int(
         os.getenv("EMAIL_SMTP_PORT"),
         default=587,
@@ -582,7 +736,7 @@ def load_settings(require_routing: bool = True) -> Settings:
     bot_target_chat_ref: str | int | None = _coerce_ref(bot_target_chat_raw) if bot_target_chat_raw else None
     pm_alert_target_chat_ref: str | int | None = None
     source_delivery_enabled = forwarding_enabled or email_forwarding_enabled
-    pm_alerts_active = pm_alerts_enabled or email_pm_alerts_enabled
+    pm_alerts_active = pm_alerts_enabled or email_pm_alerts_batch_enabled
     if require_routing and source_delivery_enabled:
         if not source_chats:
             raise ValueError("Environment variable SOURCE_CHATS is required")
@@ -597,6 +751,8 @@ def load_settings(require_routing: bool = True) -> Settings:
         raise ValueError("PM_ALERTS_AUTO_DELETE_ENABLED=true requires PM_ALERTS_ENABLED=true")
     if pm_alert_require_my_silence and not pm_alerts_active:
         raise ValueError("PM_ALERT_REQUIRE_MY_SILENCE=true requires PM alerts delivery enabled")
+    if email_pm_alerts_batch_enabled and email_pm_alerts_batch_minutes < 1:
+        raise ValueError("EMAIL_PM_ALERTS_BATCH_MINUTES must be at least 1 when EMAIL_PM_ALERTS_BATCH_ENABLED=true")
 
     if pm_alerts_auto_delete_after_hours > 48:
         raise ValueError("PM_ALERTS_AUTO_DELETE_AFTER_HOURS cannot be greater than 48")
@@ -613,7 +769,7 @@ def load_settings(require_routing: bool = True) -> Settings:
     if email_smtp_port < 1:
         raise ValueError("EMAIL_SMTP_PORT must be a positive integer")
 
-    email_any_enabled = email_forwarding_enabled or email_pm_alerts_enabled
+    email_any_enabled = email_forwarding_enabled or email_pm_alerts_batch_enabled
     if email_any_enabled:
         if not email_smtp_host:
             raise ValueError("EMAIL_SMTP_HOST is required when email delivery is enabled")
@@ -673,7 +829,12 @@ def load_settings(require_routing: bool = True) -> Settings:
         pm_alerts_auto_delete_after_hours=pm_alerts_auto_delete_after_hours,
         pm_alerts_auto_delete_file=os.getenv("PM_ALERTS_AUTO_DELETE_FILE", f"{session_name}_pm_alerts_messages.json"),
         email_forwarding_enabled=email_forwarding_enabled,
-        email_pm_alerts_enabled=email_pm_alerts_enabled,
+        email_pm_alerts_batch_enabled=email_pm_alerts_batch_enabled,
+        email_pm_alerts_batch_minutes=email_pm_alerts_batch_minutes,
+        email_pm_alerts_batch_file=os.getenv(
+            "EMAIL_PM_ALERTS_BATCH_FILE",
+            f"{session_name}_email_pm_alerts_batch.json",
+        ),
         email_smtp_host=email_smtp_host,
         email_smtp_port=email_smtp_port,
         email_use_tls=email_use_tls,
@@ -877,6 +1038,15 @@ def _format_email_forward_plain(
     return "\n\n".join(sections)
 
 
+def _format_pm_alert_email_line(message: types.Message) -> str:
+    raw_text = (message.message or "").strip()
+    if raw_text:
+        return " ".join(raw_text.splitlines()).strip()
+    if message.media is not None:
+        return "[media message]"
+    return "[empty message]"
+
+
 async def _get_reply_quote_text(message: types.Message) -> str | None:
     reply_to_message_id = getattr(message, "reply_to_msg_id", None)
     if reply_to_message_id is None:
@@ -1057,10 +1227,54 @@ async def _pm_alerts_auto_delete_loop(
         logging.info("PM alerts auto-delete: deleted %s message(s)", deleted_count)
 
 
+async def _email_pm_alerts_batch_loop(
+    *,
+    email_sender: EmailSender,
+    batch_store: EmailPmBatchStore,
+) -> None:
+    retry_delay_seconds = 60
+    idle_sleep_seconds = 5
+    logging.info("Email PM alerts batch loop is running.")
+
+    while True:
+        now_ts = int(time.time())
+        due_entries = await batch_store.get_due_entries(now_ts)
+        if due_entries:
+            for sender_id, sender_label, lines in due_entries:
+                body = "\n".join(lines)
+                try:
+                    await email_sender.send(
+                        subject=sender_label,
+                        body=body,
+                    )
+                    await batch_store.remove(sender_id)
+                    logging.info(
+                        "Sent batched PM alert email for %s (%s message lines)",
+                        sender_label,
+                        len(lines),
+                    )
+                except Exception as exc:
+                    logging.exception(
+                        "Failed to send batched PM alert email for %s: %s",
+                        sender_label,
+                        exc,
+                    )
+                    await batch_store.postpone(sender_id, retry_delay_seconds)
+            continue
+
+        next_due_ts = await batch_store.next_due_ts()
+        if next_due_ts is None:
+            await asyncio.sleep(idle_sleep_seconds)
+            continue
+
+        sleep_seconds = max(1, min(idle_sleep_seconds, next_due_ts - int(time.time())))
+        await asyncio.sleep(sleep_seconds)
+
+
 async def main() -> None:
     args = _parse_args()
     settings = load_settings(require_routing=not args.list_chats)
-    pm_alerts_active = settings.pm_alerts_enabled or settings.email_pm_alerts_enabled
+    pm_alerts_active = settings.pm_alerts_enabled or settings.email_pm_alerts_batch_enabled
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
@@ -1075,7 +1289,7 @@ async def main() -> None:
         return
 
     email_sender: EmailSender | None = None
-    if settings.email_forwarding_enabled or settings.email_pm_alerts_enabled:
+    if settings.email_forwarding_enabled or settings.email_pm_alerts_batch_enabled:
         email_sender = EmailSender(
             smtp_host=settings.email_smtp_host or "",
             smtp_port=settings.email_smtp_port,
@@ -1104,6 +1318,8 @@ async def main() -> None:
     pm_alert_my_activity_store: PmAlertMyActivityStore | None = None
     pm_alert_messages_store: PmAlertMessagesStore | None = None
     pm_alerts_auto_delete_task: asyncio.Task[Any] | None = None
+    email_pm_alerts_batch_store: EmailPmBatchStore | None = None
+    email_pm_alerts_batch_task: asyncio.Task[Any] | None = None
     pm_alert_excluded_chat_ids: set[int] = set()
     need_bot_client = settings.pm_alerts_enabled or (settings.forwarding_enabled and settings.delivery_mode == "bot")
     if need_bot_client:
@@ -1125,7 +1341,7 @@ async def main() -> None:
         if settings.pm_alerts_enabled:
             pm_alert_target_entity = await bot_client.get_entity(settings.pm_alert_target_chat)
             pm_alert_target_peer_id = get_peer_id(pm_alert_target_entity)
-        pm_alerts_store = PmAlertCooldownStore(settings.pm_alerts_file)
+            pm_alerts_store = PmAlertCooldownStore(settings.pm_alerts_file)
         if settings.pm_alert_require_my_silence:
             pm_alert_my_activity_store = PmAlertMyActivityStore(settings.pm_alert_my_activity_file)
         if settings.pm_alerts_auto_delete_enabled:
@@ -1144,6 +1360,14 @@ async def main() -> None:
         if settings.pm_alerts_exclude_chats:
             excluded_entities = await _resolve_entities(client, settings.pm_alerts_exclude_chats)
             pm_alert_excluded_chat_ids = {get_peer_id(entity) for entity in excluded_entities}
+    if settings.email_pm_alerts_batch_enabled and email_sender is not None:
+        email_pm_alerts_batch_store = EmailPmBatchStore(settings.email_pm_alerts_batch_file)
+        email_pm_alerts_batch_task = asyncio.create_task(
+            _email_pm_alerts_batch_loop(
+                email_sender=email_sender,
+                batch_store=email_pm_alerts_batch_store,
+            )
+        )
 
     source_peer_ids: set[int] = set()
     target_peer_id: int | None = None
@@ -1211,21 +1435,27 @@ async def main() -> None:
         logging.info("Forwarding from SOURCE_CHATS is disabled (FORWARDING_ENABLED=false).")
     if settings.email_forwarding_enabled:
         logging.info("Email forwarding enabled: to=%s", ", ".join(settings.email_to))
-    if settings.email_pm_alerts_enabled:
-        logging.info("PM alerts email delivery enabled: to=%s", ", ".join(settings.email_to))
+    if settings.email_pm_alerts_batch_enabled:
+        logging.info(
+            "PM alerts email batch delivery enabled: to=%s, debounce=%s minute(s), file=%s",
+            ", ".join(settings.email_to),
+            settings.email_pm_alerts_batch_minutes,
+            settings.email_pm_alerts_batch_file,
+        )
     if pm_alerts_active:
         if settings.pm_alerts_enabled:
             logging.info(
                 "PM alerts Telegram delivery enabled: target=%s",
                 _entity_label(pm_alert_target_entity),
             )
+            logging.info(
+                "PM alerts Telegram cooldown: %s minute(s), lang=%s",
+                settings.pm_alert_cooldown_minutes,
+                settings.pm_alerts_lang,
+            )
         else:
             logging.info("PM alerts Telegram delivery disabled (PM_ALERTS_ENABLED=false).")
-        logging.info(
-            "PM alerts enabled: cooldown=%s minute(s), lang=%s",
-            settings.pm_alert_cooldown_minutes,
-            settings.pm_alerts_lang,
-        )
+            logging.info("PM alerts language for templates: %s", settings.pm_alerts_lang)
         if settings.pm_alert_require_my_silence:
             logging.info(
                 "PM alerts sender silence enabled: min %s minute(s) since your last PM message",
@@ -1577,7 +1807,7 @@ async def main() -> None:
 
     @client.on(events.NewMessage(incoming=True))
     async def pm_alerts_handler(event: events.NewMessage.Event) -> None:
-        if not pm_alerts_active or pm_alerts_store is None:
+        if not pm_alerts_active:
             return
         if not event.is_private or event.out:
             return
@@ -1606,53 +1836,58 @@ async def main() -> None:
             has_silence = await pm_alert_my_activity_store.has_required_silence(peer_for_silence, min_silence_seconds)
             if not has_silence:
                 return
-        cooldown_seconds = settings.pm_alert_cooldown_minutes * 60
-        should_notify = await pm_alerts_store.should_notify(event.sender_id, cooldown_seconds)
-        if not should_notify:
-            return
 
         sender = await event.get_sender()
         sender_label = _entity_label(sender)
         if settings.pm_alerts_lang == "eng":
             alert_text = f"{sender_label} sent a new message"
-            email_alert_text = "Sent a new message"
         else:
             alert_text = f"{sender_label} отправил(-а) новое сообщение"
-            email_alert_text = "Отправил(-а) новое сообщение"
         telegram_sent = False
-        email_sent = False
+        email_queued = False
 
         if settings.pm_alerts_enabled:
-            try:
-                sent_message = await bot_client.send_message(pm_alert_target_entity, alert_text, link_preview=False)
-                sent_message_id = _extract_message_id(sent_message)
-                if (
-                    settings.pm_alerts_auto_delete_enabled
-                    and pm_alert_messages_store is not None
-                    and pm_alert_target_peer_id is not None
-                    and sent_message_id is not None
-                ):
-                    await pm_alert_messages_store.add(pm_alert_target_peer_id, sent_message_id)
-                telegram_sent = True
-            except Exception as exc:
-                logging.exception("Failed to send PM alert to Telegram for %s: %s", sender_label, exc)
+            if pm_alerts_store is None:
+                logging.error("PM alerts cooldown store is not initialized")
+                return
+            cooldown_seconds = settings.pm_alert_cooldown_minutes * 60
+            should_notify = await pm_alerts_store.should_notify(event.sender_id, cooldown_seconds)
+            if should_notify:
+                try:
+                    sent_message = await bot_client.send_message(pm_alert_target_entity, alert_text, link_preview=False)
+                    sent_message_id = _extract_message_id(sent_message)
+                    if (
+                        settings.pm_alerts_auto_delete_enabled
+                        and pm_alert_messages_store is not None
+                        and pm_alert_target_peer_id is not None
+                        and sent_message_id is not None
+                    ):
+                        await pm_alert_messages_store.add(pm_alert_target_peer_id, sent_message_id)
+                    telegram_sent = True
+                except Exception as exc:
+                    logging.exception("Failed to send PM alert to Telegram for %s: %s", sender_label, exc)
 
-        if settings.email_pm_alerts_enabled and email_sender is not None:
+        if settings.email_pm_alerts_batch_enabled and email_pm_alerts_batch_store is not None:
             try:
-                await email_sender.send(
-                    subject=sender_label,
-                    body=email_alert_text,
+                line = _format_pm_alert_email_line(message)
+                due_at = await email_pm_alerts_batch_store.add_message(
+                    sender_id=event.sender_id,
+                    sender_label=sender_label,
+                    line=line,
+                    batch_seconds=settings.email_pm_alerts_batch_minutes * 60,
                 )
-                email_sent = True
+                email_queued = True
+                due_dt = datetime.fromtimestamp(due_at).strftime("%Y-%m-%d %H:%M:%S")
+                logging.info("Queued PM alert email batch for %s (flush at %s)", sender_label, due_dt)
             except Exception as exc:
-                logging.exception("Failed to send PM alert email for %s: %s", sender_label, exc)
+                logging.exception("Failed to queue PM alert email batch for %s: %s", sender_label, exc)
 
-        if telegram_sent or email_sent:
+        if telegram_sent or email_queued:
             logging.info(
-                "Sent PM alert for %s%s%s",
+                "Processed PM alert for %s%s%s",
                 sender_label,
                 " [telegram]" if telegram_sent else "",
-                " [email]" if email_sent else "",
+                " [email-batch-queued]" if email_queued else "",
             )
 
     if settings.forwarding_enabled:
@@ -1715,6 +1950,10 @@ async def main() -> None:
             pm_alerts_auto_delete_task.cancel()
             with suppress(asyncio.CancelledError):
                 await pm_alerts_auto_delete_task
+        if email_pm_alerts_batch_task is not None:
+            email_pm_alerts_batch_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await email_pm_alerts_batch_task
 
 
 if __name__ == "__main__":

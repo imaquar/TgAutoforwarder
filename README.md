@@ -11,7 +11,7 @@ Telegram autoforwarder on Python + Telethon.
 - In `DELIVERY_MODE=user`, marks target dialog as unread after forwarding.
 - Syncs edits: when source message is edited, forwarded text/caption is updated (`user` and `bot` modes).
 - Optional PM alerts with cooldown, language (`eng` / `ru`), and scheduled auto-delete.
-- Optional email delivery for source forwarding and PM alerts.
+- Optional email delivery for source forwarding and debounced PM alert batches.
 - Supports login by phone code or QR (`AUTH_MODE=qr`).
 
 ## 1. Install
@@ -50,7 +50,7 @@ SKIP_OUTGOING=true
 
 - `SOURCE_CHATS` and `TARGET_CHAT` support `@username`, links, and numeric IDs.
 - `FORWARDING_ENABLED=false` disables forwarding from `SOURCE_CHATS` completely.
-- If `FORWARDING_ENABLED=false`, keep at least one other delivery channel enabled (`EMAIL_FORWARDING_ENABLED`, `PM_ALERTS_ENABLED`, or `EMAIL_PM_ALERTS_ENABLED`).
+- If `FORWARDING_ENABLED=false`, keep at least one other delivery channel enabled (`EMAIL_FORWARDING_ENABLED`, `PM_ALERTS_ENABLED`, or `EMAIL_PM_ALERTS_BATCH_ENABLED`).
 - `SKIP_OUTGOING=true` means your own outgoing messages from `SOURCE_CHATS` will be ignored.  
 - Set `SKIP_OUTGOING=false` if you want to forward your own messages too.
 
@@ -124,7 +124,7 @@ PM_ALERTS_EXCLUDE_CHATS=@john,123456789
 
 - `PM_ALERTS_ENABLED`: turns private-message alerts on/off.
 - `PM_ALERT_TARGET_CHAT`: where Telegram PM alerts are sent. If empty, fallback is `BOT_TARGET_CHAT` then `TARGET_CHAT`.
-- `PM_ALERT_COOLDOWN_MINUTES`: minimum interval between alerts from the same sender.
+- `PM_ALERT_COOLDOWN_MINUTES`: minimum interval between Telegram PM alerts from the same sender.
 - Example: `60` means one alert per sender per 60 minutes, `0` disables cooldown.
 - `PM_ALERTS_LANG`: alert text language (`eng` or `ru`).
 - `PM_ALERTS_FILE`: file with cooldown state, so limits survive restarts.
@@ -153,7 +153,7 @@ PM_ALERTS_ENABLED=true
 If you want PM alerts only by email (without Telegram PM alerts):
 ```env
 PM_ALERTS_ENABLED=false
-EMAIL_PM_ALERTS_ENABLED=true
+EMAIL_PM_ALERTS_BATCH_ENABLED=true
 ```
 
 ## 9. Optional email delivery
@@ -162,8 +162,10 @@ EMAIL_PM_ALERTS_ENABLED=true
 # email copy of SOURCE_CHATS forwarding
 EMAIL_FORWARDING_ENABLED=false
 
-# email copy of PM alerts
-EMAIL_PM_ALERTS_ENABLED=false
+# debounced email PM alerts batch
+EMAIL_PM_ALERTS_BATCH_ENABLED=false
+EMAIL_PM_ALERTS_BATCH_MINUTES=10
+EMAIL_PM_ALERTS_BATCH_FILE=autoforwarder_email_pm_alerts_batch.json
 
 EMAIL_SMTP_HOST=
 EMAIL_SMTP_PORT=587
@@ -175,11 +177,15 @@ EMAIL_TO=me@example.com,backup@example.com
 ```
 
 - `EMAIL_FORWARDING_ENABLED`: send forwarded source messages to email.
-- `EMAIL_PM_ALERTS_ENABLED`: send PM alerts to email.
-- PM alerts can be email-only with `PM_ALERTS_ENABLED=false` and `EMAIL_PM_ALERTS_ENABLED=true`.
+- `EMAIL_PM_ALERTS_BATCH_ENABLED`: collect PM messages per sender and send one email after inactivity timeout.
+- `EMAIL_PM_ALERTS_BATCH_MINUTES`: inactivity timeout for PM batch; each new message from the same sender resets the timer.
+- `EMAIL_PM_ALERTS_BATCH_FILE`: pending batch storage used for restart safety; batch entry is removed after successful send.
+- PM alerts can be email-only with `PM_ALERTS_ENABLED=false` and `EMAIL_PM_ALERTS_BATCH_ENABLED=true`.
+- When both are enabled, Telegram PM alerts still use `PM_ALERT_COOLDOWN_MINUTES`, while email PM alerts use batch timeout logic.
 - If at least one email flag is `true`, SMTP settings and `EMAIL_TO` are required.
 - Email subject for forwarding is the source chat title.
-- Email subject for PM alerts is the sender name.
+- Email subject for PM alert batch is the sender name.
+- Email body for PM alert batch contains all buffered messages, one message per line (no empty lines between messages).
 - Forwarding email body contains quote/text content; source message link is placed at the end.
 
 ## 10. Run

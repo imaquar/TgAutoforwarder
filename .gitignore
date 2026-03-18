@@ -6,6 +6,7 @@ __pycache__/
 *_pm_alerts.json
 *_pm_alerts_messages.json
 *_pm_alerts_my_activity.json
+*_email_pm_alerts_batch.json
 .DS_Store
 .env
 .venv/
