@@ -11,6 +11,7 @@ Telegram autoforwarder on Python + Telethon.
 - In `DELIVERY_MODE=user`, marks target dialog as unread after forwarding.
 - Syncs edits: when source message is edited, forwarded text/caption is updated (`user` and `bot` modes).
 - Optional PM alerts with cooldown, language (`eng` / `ru`), and scheduled auto-delete.
+- Optional email delivery for source forwarding and PM alerts.
 - Supports login by phone code or QR (`AUTH_MODE=qr`).
 
 ## 1. Install
@@ -148,7 +149,31 @@ FORWARDING_ENABLED=false
 PM_ALERTS_ENABLED=true
 ```
 
-## 9. Run
+## 9. Optional email delivery
+
+```env
+# email copy of SOURCE_CHATS forwarding
+EMAIL_FORWARDING_ENABLED=false
+
+# email copy of PM alerts
+EMAIL_PM_ALERTS_ENABLED=false
+
+EMAIL_SMTP_HOST=
+EMAIL_SMTP_PORT=587
+EMAIL_USE_TLS=true
+EMAIL_SMTP_USERNAME=
+EMAIL_SMTP_PASSWORD=
+EMAIL_FROM=
+EMAIL_TO=me@example.com,backup@example.com
+EMAIL_SUBJECT_PREFIX=[TgAutoforwarder]
+```
+
+- `EMAIL_FORWARDING_ENABLED`: send forwarded source messages to email.
+- `EMAIL_PM_ALERTS_ENABLED`: send PM alerts to email.
+- `EMAIL_PM_ALERTS_ENABLED` requires `PM_ALERTS_ENABLED=true`.
+- If at least one email flag is `true`, SMTP settings and `EMAIL_TO` are required.
+
+## 10. Run
 
 ```bash
 python forwarder.py
@@ -159,7 +184,7 @@ If `AUTH_MODE=phone`, Telethon asks for phone/code/2FA.
 If `AUTH_MODE=qr`, scan terminal QR in Telegram:
 `Settings -> Devices -> Link Desktop Device`.
 
-## 10. Useful commands
+## 11. Useful commands
 
 List chats and IDs:
 
@@ -173,7 +198,7 @@ With custom limit:
 python forwarder.py --list-chats --list-limit 500
 ```
 
-## 11. Notes
+## 12. Notes
 
 - In `DELIVERY_MODE=user`, target chat is marked unread after forwarding.
 - Edit sync works for messages that were forwarded while map file was maintained.

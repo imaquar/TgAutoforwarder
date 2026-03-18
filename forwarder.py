@@ -2,12 +2,14 @@ import asyncio
 import argparse
 from contextlib import suppress
 from datetime import datetime, timedelta
+from email.message import EmailMessage
 from getpass import getpass
 import html
 import json
 import logging
 import mimetypes
 import os
+import smtplib
 import sys
 import tempfile
 import time
@@ -52,6 +54,16 @@ class Settings:
     pm_alerts_auto_delete_minute: int
     pm_alerts_auto_delete_after_hours: int
     pm_alerts_auto_delete_file: str
+    email_forwarding_enabled: bool
+    email_pm_alerts_enabled: bool
+    email_smtp_host: str | None
+    email_smtp_port: int
+    email_use_tls: bool
+    email_smtp_username: str | None
+    email_smtp_password: str | None
+    email_from: str | None
+    email_to: list[str]
+    email_subject_prefix: str
 
 
 class MessageMapStore:
@@ -330,6 +342,78 @@ class PmAlertMessagesStore:
             self._save()
 
 
+class EmailSender:
+    def __init__(
+        self,
+        *,
+        smtp_host: str,
+        smtp_port: int,
+        use_tls: bool,
+        smtp_username: str | None,
+        smtp_password: str | None,
+        from_addr: str,
+        to_addrs: list[str],
+    ) -> None:
+        self.smtp_host = smtp_host
+        self.smtp_port = smtp_port
+        self.use_tls = use_tls
+        self.smtp_username = smtp_username
+        self.smtp_password = smtp_password
+        self.from_addr = from_addr
+        self.to_addrs = to_addrs
+
+    def _send_sync(
+        self,
+        *,
+        subject: str,
+        body: str,
+        attachments: list[tuple[str, str]],
+    ) -> None:
+        message = EmailMessage()
+        message["Subject"] = subject
+        message["From"] = self.from_addr
+        message["To"] = ", ".join(self.to_addrs)
+        message.set_content(body)
+
+        for file_path, attachment_name in attachments:
+            mime_type, _ = mimetypes.guess_type(attachment_name)
+            if mime_type:
+                maintype, subtype = mime_type.split("/", 1)
+            else:
+                maintype, subtype = "application", "octet-stream"
+            with open(file_path, "rb") as file_obj:
+                file_data = file_obj.read()
+            message.add_attachment(
+                file_data,
+                maintype=maintype,
+                subtype=subtype,
+                filename=attachment_name,
+            )
+
+        with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=30) as smtp:
+            smtp.ehlo()
+            if self.use_tls:
+                smtp.starttls()
+                smtp.ehlo()
+            if self.smtp_username:
+                smtp.login(self.smtp_username, self.smtp_password or "")
+            smtp.send_message(message)
+
+    async def send(
+        self,
+        *,
+        subject: str,
+        body: str,
+        attachments: list[tuple[str, str]] | None = None,
+    ) -> None:
+        await asyncio.to_thread(
+            self._send_sync,
+            subject=subject,
+            body=body,
+            attachments=attachments or [],
+        )
+
+
 def _parse_bool(value: str | None, default: bool = True) -> bool:
     if value is None:
         return default
@@ -365,6 +449,16 @@ def _parse_pm_alerts_lang(value: str | None) -> str:
 
 def _parse_refs_csv(value: str | None) -> list[str]:
     return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+
+def _parse_emails_csv(value: str | None) -> list[str]:
+    candidates = [item.strip() for item in (value or "").split(",") if item.strip()]
+    result: list[str] = []
+    for candidate in candidates:
+        if "@" not in candidate:
+            raise ValueError("EMAIL_TO must contain valid email addresses")
+        result.append(candidate)
+    return result
 
 
 def _parse_non_negative_int(value: str | None, default: int, var_name: str) -> int:
@@ -441,6 +535,15 @@ def load_settings(require_routing: bool = True) -> Settings:
     pm_alert_target_chat_raw = (os.getenv("PM_ALERT_TARGET_CHAT") or "").strip()
     pm_alert_require_my_silence = _parse_bool(os.getenv("PM_ALERT_REQUIRE_MY_SILENCE"), default=False)
     pm_alerts_auto_delete_enabled = _parse_bool(os.getenv("PM_ALERTS_AUTO_DELETE_ENABLED"), default=False)
+    email_forwarding_enabled = _parse_bool(os.getenv("EMAIL_FORWARDING_ENABLED"), default=False)
+    email_pm_alerts_enabled = _parse_bool(os.getenv("EMAIL_PM_ALERTS_ENABLED"), default=False)
+    email_smtp_host = (os.getenv("EMAIL_SMTP_HOST") or "").strip() or None
+    email_smtp_username = (os.getenv("EMAIL_SMTP_USERNAME") or "").strip() or None
+    email_smtp_password = (os.getenv("EMAIL_SMTP_PASSWORD") or "").strip() or None
+    email_from = (os.getenv("EMAIL_FROM") or "").strip() or None
+    email_to = _parse_emails_csv(os.getenv("EMAIL_TO"))
+    email_use_tls = _parse_bool(os.getenv("EMAIL_USE_TLS"), default=True)
+    email_subject_prefix = (os.getenv("EMAIL_SUBJECT_PREFIX") or "[TgAutoforwarder]").strip() or "[TgAutoforwarder]"
 
     if not api_id_raw:
         raise ValueError("Environment variable API_ID is required")
@@ -470,24 +573,33 @@ def load_settings(require_routing: bool = True) -> Settings:
         default=30,
         var_name="PM_ALERT_MIN_SILENCE_AFTER_MY_MESSAGE_MINUTES",
     )
+    email_smtp_port = _parse_non_negative_int(
+        os.getenv("EMAIL_SMTP_PORT"),
+        default=587,
+        var_name="EMAIL_SMTP_PORT",
+    )
 
     source_chats: list[str] = [item.strip() for item in source_chats_raw.split(",") if item.strip()]
     target_chat_ref: str | int | None = _coerce_ref(target_chat.strip()) if target_chat.strip() else None
     bot_target_chat_ref: str | int | None = _coerce_ref(bot_target_chat_raw) if bot_target_chat_raw else None
     pm_alert_target_chat_ref: str | int | None = None
-    if require_routing and forwarding_enabled:
+    source_delivery_enabled = forwarding_enabled or email_forwarding_enabled
+    if require_routing and source_delivery_enabled:
         if not source_chats:
             raise ValueError("Environment variable SOURCE_CHATS is required")
+    if require_routing and forwarding_enabled:
         if target_chat_ref is None:
             raise ValueError("Environment variable TARGET_CHAT is required")
 
-    if require_routing and not forwarding_enabled and not pm_alerts_enabled:
-        raise ValueError("Nothing to run: set FORWARDING_ENABLED=true or PM_ALERTS_ENABLED=true")
+    if require_routing and not source_delivery_enabled and not pm_alerts_enabled and not email_pm_alerts_enabled:
+        raise ValueError("Nothing to run: enable forwarding, PM alerts, or email delivery")
 
     if pm_alerts_auto_delete_enabled and not pm_alerts_enabled:
         raise ValueError("PM_ALERTS_AUTO_DELETE_ENABLED=true requires PM_ALERTS_ENABLED=true")
     if pm_alert_require_my_silence and not pm_alerts_enabled:
         raise ValueError("PM_ALERT_REQUIRE_MY_SILENCE=true requires PM_ALERTS_ENABLED=true")
+    if email_pm_alerts_enabled and not pm_alerts_enabled:
+        raise ValueError("EMAIL_PM_ALERTS_ENABLED=true requires PM_ALERTS_ENABLED=true")
 
     if pm_alerts_auto_delete_after_hours > 48:
         raise ValueError("PM_ALERTS_AUTO_DELETE_AFTER_HOURS cannot be greater than 48")
@@ -497,6 +609,20 @@ def load_settings(require_routing: bool = True) -> Settings:
     if (forwarding_enabled and delivery_mode == "bot") or pm_alerts_enabled:
         if not bot_token:
             raise ValueError("Environment variable BOT_TOKEN is required when DELIVERY_MODE=bot and forwarding is enabled, or when PM_ALERTS_ENABLED=true")
+
+    if email_smtp_port < 1:
+        raise ValueError("EMAIL_SMTP_PORT must be a positive integer")
+
+    email_any_enabled = email_forwarding_enabled or email_pm_alerts_enabled
+    if email_any_enabled:
+        if not email_smtp_host:
+            raise ValueError("EMAIL_SMTP_HOST is required when email delivery is enabled")
+        if not email_from:
+            raise ValueError("EMAIL_FROM is required when email delivery is enabled")
+        if not email_to:
+            raise ValueError("EMAIL_TO is required when email delivery is enabled")
+        if email_smtp_username and not email_smtp_password:
+            raise ValueError("EMAIL_SMTP_PASSWORD is required when EMAIL_SMTP_USERNAME is set")
 
     if forwarding_enabled and delivery_mode == "bot":
         bot_target_chat_ref = bot_target_chat_ref or target_chat_ref
@@ -546,6 +672,16 @@ def load_settings(require_routing: bool = True) -> Settings:
         pm_alerts_auto_delete_minute=pm_alerts_auto_delete_minute,
         pm_alerts_auto_delete_after_hours=pm_alerts_auto_delete_after_hours,
         pm_alerts_auto_delete_file=os.getenv("PM_ALERTS_AUTO_DELETE_FILE", f"{session_name}_pm_alerts_messages.json"),
+        email_forwarding_enabled=email_forwarding_enabled,
+        email_pm_alerts_enabled=email_pm_alerts_enabled,
+        email_smtp_host=email_smtp_host,
+        email_smtp_port=email_smtp_port,
+        email_use_tls=email_use_tls,
+        email_smtp_username=email_smtp_username,
+        email_smtp_password=email_smtp_password,
+        email_from=email_from,
+        email_to=email_to,
+        email_subject_prefix=email_subject_prefix,
     )
 
 
@@ -721,6 +857,28 @@ def _format_prefixed_html(
     return "\n\n".join(sections)
 
 
+def _format_prefixed_plain(
+    source_title: str,
+    text: str,
+    quote_text: str | None = None,
+    message_url: str | None = None,
+) -> str:
+    sections: list[str] = [f"[{source_title}]"]
+    if message_url:
+        sections.append(message_url)
+
+    stripped_quote_text = (quote_text or "").strip()
+    if stripped_quote_text:
+        quoted_lines = "\n".join(f"> {line}" for line in stripped_quote_text.splitlines())
+        sections.append(quoted_lines)
+
+    stripped_text = text.strip()
+    if stripped_text:
+        sections.append(stripped_text)
+
+    return "\n\n".join(sections)
+
+
 async def _get_reply_quote_text(message: types.Message) -> str | None:
     reply_to_message_id = getattr(message, "reply_to_msg_id", None)
     if reply_to_message_id is None:
@@ -739,6 +897,10 @@ async def _get_reply_quote_text(message: types.Message) -> str | None:
     if reply_message.media is not None:
         return "[media message]"
     return None
+
+
+def _build_email_subject(prefix: str, source_title: str) -> str:
+    return f"{prefix} {source_title}".strip()
 
 
 async def _send_media_as_bot(
@@ -917,11 +1079,24 @@ async def main() -> None:
         await client.disconnect()
         return
 
+    email_sender: EmailSender | None = None
+    if settings.email_forwarding_enabled or settings.email_pm_alerts_enabled:
+        email_sender = EmailSender(
+            smtp_host=settings.email_smtp_host or "",
+            smtp_port=settings.email_smtp_port,
+            use_tls=settings.email_use_tls,
+            smtp_username=settings.email_smtp_username,
+            smtp_password=settings.email_smtp_password,
+            from_addr=settings.email_from or "",
+            to_addrs=settings.email_to,
+        )
+
     source_entities: list[Any] = []
     target_entity: Any | None = None
-    if settings.forwarding_enabled:
+    if settings.forwarding_enabled or settings.email_forwarding_enabled:
         source_entities = await _resolve_entities(client, settings.source_chats)
-        target_entity = await client.get_entity(settings.target_chat)
+        if settings.forwarding_enabled:
+            target_entity = await client.get_entity(settings.target_chat)
 
     bot_client: TelegramClient | None = None
     bot_target_entity: Any | None = None
@@ -975,8 +1150,9 @@ async def main() -> None:
 
     source_peer_ids: set[int] = set()
     target_peer_id: int | None = None
-    if settings.forwarding_enabled:
+    if settings.forwarding_enabled or settings.email_forwarding_enabled:
         source_peer_ids = {get_peer_id(entity) for entity in source_entities}
+    if settings.forwarding_enabled:
         try:
             if settings.delivery_mode == "bot":
                 target_peer_id = get_peer_id(await client.get_entity(settings.bot_target_chat))
@@ -1019,8 +1195,27 @@ async def main() -> None:
             logging.info("Global sender filter enabled: %s sender(s)", len(global_allowed_sender_ids))
         if chat_allowed_sender_ids:
             logging.info("Per-chat sender filter enabled for %s chat(s)", len(chat_allowed_sender_ids))
+    elif settings.email_forwarding_enabled:
+        logging.info("Telegram forwarding to TARGET_CHAT is disabled (FORWARDING_ENABLED=false). Email forwarding is enabled.")
+        global_allowed_sender_ids = await _resolve_allowed_sender_ids(client, settings.allowed_senders)
+        chat_allowed_sender_ids = await _resolve_chat_sender_filters(client, settings.chat_allowed_senders)
+        for chat_peer_id in chat_allowed_sender_ids:
+            if chat_peer_id not in source_peer_ids:
+                logging.warning(
+                    "CHAT_ALLOWED_SENDERS contains chat %s that is not in SOURCE_CHATS. This filter will not be used.",
+                    chat_peer_id,
+                )
+        if global_allowed_sender_ids:
+            logging.info("Global sender filter enabled: %s sender(s)", len(global_allowed_sender_ids))
+        if chat_allowed_sender_ids:
+            logging.info("Per-chat sender filter enabled for %s chat(s)", len(chat_allowed_sender_ids))
+        logging.info("Source chats (email): %s", ", ".join(_entity_label(entity) for entity in source_entities))
     else:
         logging.info("Forwarding from SOURCE_CHATS is disabled (FORWARDING_ENABLED=false).")
+    if settings.email_forwarding_enabled:
+        logging.info("Email forwarding enabled: to=%s", ", ".join(settings.email_to))
+    if settings.email_pm_alerts_enabled:
+        logging.info("PM alerts email delivery enabled: to=%s", ", ".join(settings.email_to))
     if settings.pm_alerts_enabled:
         logging.info(
             "PM alerts enabled: target=%s, cooldown=%s minute(s), lang=%s",
@@ -1090,81 +1285,119 @@ async def main() -> None:
                 quote_text=reply_quote_text,
             )
             formatted_prefix_only = _format_prefixed_html(source_title, "", message_url=message_url)
+            plain_email_text = _format_prefixed_plain(
+                source_title,
+                original_text,
+                quote_text=reply_quote_text,
+                message_url=message_url,
+            )
             sent_target_message_id: int | None = None
+            telegram_sent = False
+            email_sent = False
 
-            try:
-                if message.media:
-                    caption = formatted_text
-                    if settings.delivery_mode == "bot":
-                        try:
-                            send_result = await _send_media_as_bot(
-                                source_client=client,
-                                bot_client=bot_client,
-                                bot_target_entity=bot_target_entity,
-                                message=message,
-                                caption=caption,
-                            )
-                            sent_target_message_id = _extract_message_id(send_result)
-                        except Exception:
+            if settings.forwarding_enabled:
+                try:
+                    if message.media:
+                        caption = formatted_text
+                        if settings.delivery_mode == "bot":
+                            try:
+                                send_result = await _send_media_as_bot(
+                                    source_client=client,
+                                    bot_client=bot_client,
+                                    bot_target_entity=bot_target_entity,
+                                    message=message,
+                                    caption=caption,
+                                )
+                                sent_target_message_id = _extract_message_id(send_result)
+                            except Exception:
+                                sent_msg = await bot_client.send_message(
+                                    bot_target_entity,
+                                    formatted_prefix_only,
+                                    link_preview=False,
+                                    parse_mode="html",
+                                )
+                                sent_target_message_id = _extract_message_id(sent_msg)
+                        else:
+                            try:
+                                sent_msg = await client.send_file(
+                                    target_entity,
+                                    file=message.media,
+                                    caption=caption,
+                                    link_preview=False,
+                                    parse_mode="html",
+                                )
+                                sent_target_message_id = _extract_message_id(sent_msg)
+                            except Exception:
+                                # Some media types may not allow captions.
+                                sent_msg = await client.send_message(
+                                    target_entity,
+                                    formatted_prefix_only,
+                                    link_preview=False,
+                                    parse_mode="html",
+                                )
+                                sent_target_message_id = _extract_message_id(sent_msg)
+                                await client.forward_messages(target_entity, message)
+                    else:
+                        if not original_text:
+                            # Skip text-only forwarding to Telegram if there is no text.
+                            pass
+                        elif settings.delivery_mode == "bot":
                             sent_msg = await bot_client.send_message(
                                 bot_target_entity,
-                                formatted_prefix_only,
+                                formatted_text,
                                 link_preview=False,
                                 parse_mode="html",
                             )
                             sent_target_message_id = _extract_message_id(sent_msg)
-                    else:
-                        try:
-                            sent_msg = await client.send_file(
-                                target_entity,
-                                file=message.media,
-                                caption=caption,
-                                link_preview=False,
-                                parse_mode="html",
-                            )
-                            sent_target_message_id = _extract_message_id(sent_msg)
-                        except Exception:
-                            # Some media types may not allow captions.
+                        else:
                             sent_msg = await client.send_message(
                                 target_entity,
-                                formatted_prefix_only,
+                                formatted_text,
                                 link_preview=False,
                                 parse_mode="html",
                             )
                             sent_target_message_id = _extract_message_id(sent_msg)
-                            await client.forward_messages(target_entity, message)
-                else:
-                    if not original_text:
-                        return
-                    if settings.delivery_mode == "bot":
-                        sent_msg = await bot_client.send_message(
-                            bot_target_entity,
-                            formatted_text,
-                            link_preview=False,
-                            parse_mode="html",
-                        )
-                        sent_target_message_id = _extract_message_id(sent_msg)
-                    else:
-                        sent_msg = await client.send_message(
-                            target_entity,
-                            formatted_text,
-                            link_preview=False,
-                            parse_mode="html",
-                        )
-                        sent_target_message_id = _extract_message_id(sent_msg)
 
-                if (
-                    message_map_store is not None
-                    and sent_target_message_id is not None
-                    and event.chat_id is not None
-                ):
-                    await message_map_store.set(event.chat_id, message.id, sent_target_message_id)
+                    if (
+                        message_map_store is not None
+                        and sent_target_message_id is not None
+                        and event.chat_id is not None
+                    ):
+                        await message_map_store.set(event.chat_id, message.id, sent_target_message_id)
 
-                if settings.delivery_mode == "user":
-                    await client(functions.messages.MarkDialogUnreadRequest(peer=target_entity, unread=True))
-                logging.info("Forwarded message from %s", source_title)
-            except Exception as exc:
-                logging.exception("Failed to forward message from %s: %s", source_title, exc)
+                    if settings.delivery_mode == "user" and sent_target_message_id is not None:
+                        await client(functions.messages.MarkDialogUnreadRequest(peer=target_entity, unread=True))
+                    telegram_sent = sent_target_message_id is not None
+                except Exception as exc:
+                    logging.exception("Failed Telegram forwarding from %s: %s", source_title, exc)
+
+            if settings.email_forwarding_enabled and email_sender is not None:
+                try:
+                    attachments: list[tuple[str, str]] = []
+                    with tempfile.TemporaryDirectory(prefix="tgfwd_email_") as temp_dir:
+                        if message.media:
+                            file_hint = os.path.join(temp_dir, _safe_media_filename(message))
+                            downloaded = await _download_media_to_path(client, message, file_hint)
+                            attachments.append((downloaded, os.path.basename(downloaded)))
+                        elif not original_text and not reply_quote_text:
+                            return
+
+                        await email_sender.send(
+                            subject=_build_email_subject(settings.email_subject_prefix, source_title),
+                            body=plain_email_text,
+                            attachments=attachments,
+                        )
+                    email_sent = True
+                except Exception as exc:
+                    logging.exception("Failed email forwarding from %s: %s", source_title, exc)
+
+            if telegram_sent or email_sent:
+                logging.info(
+                    "Forwarded message from %s%s%s",
+                    source_title,
+                    " [telegram]" if telegram_sent else "",
+                    " [email]" if email_sent else "",
+                )
 
         @client.on(events.Album(chats=source_entities))
         async def forward_album(event: events.Album.Event) -> None:
@@ -1200,85 +1433,129 @@ async def main() -> None:
                     captions.append(html.escape(text) if text else "")
 
             sent_target_ids: list[int] = []
-            try:
-                if settings.delivery_mode == "bot":
-                    try:
-                        send_result = await _send_album_as_bot(
-                            source_client=client,
-                            bot_client=bot_client,
-                            bot_target_entity=bot_target_entity,
-                            messages=album_messages,
-                            captions=captions,
-                        )
-                        sent_target_ids = _extract_message_ids(send_result)
-                    except Exception:
-                        logging.exception(
-                            "Failed to send album as grouped media from %s; falling back to separate messages.",
-                            source_title,
-                        )
-                        for idx, message in enumerate(album_messages):
-                            try:
-                                send_result = await _send_media_as_bot(
-                                    source_client=client,
-                                    bot_client=bot_client,
-                                    bot_target_entity=bot_target_entity,
-                                    message=message,
-                                    caption=captions[idx],
-                                )
-                                sent_message_id = _extract_message_id(send_result)
-                                if sent_message_id is not None:
-                                    sent_target_ids.append(sent_message_id)
-                            except Exception:
-                                logging.exception(
-                                    "Failed to send album item %s from %s",
-                                    idx + 1,
-                                    source_title,
-                                )
-                else:
-                    try:
-                        send_result = await client.send_file(
-                            target_entity,
-                            file=[message.media for message in album_messages],
-                            caption=captions,
-                            link_preview=False,
-                            parse_mode="html",
-                        )
-                        sent_target_ids = _extract_message_ids(send_result)
-                    except Exception:
-                        logging.exception(
-                            "Failed to send album as grouped media from %s; falling back to separate messages.",
-                            source_title,
-                        )
-                        for idx, message in enumerate(album_messages):
-                            try:
-                                send_result = await client.send_file(
-                                    target_entity,
-                                    file=message.media,
-                                    caption=captions[idx],
-                                    link_preview=False,
-                                    parse_mode="html",
-                                )
-                                sent_message_id = _extract_message_id(send_result)
-                                if sent_message_id is not None:
-                                    sent_target_ids.append(sent_message_id)
-                            except Exception:
-                                logging.exception(
-                                    "Failed to send album item %s from %s",
-                                    idx + 1,
-                                    source_title,
-                                )
+            telegram_sent = False
+            email_sent = False
+            if settings.forwarding_enabled:
+                try:
+                    if settings.delivery_mode == "bot":
+                        try:
+                            send_result = await _send_album_as_bot(
+                                source_client=client,
+                                bot_client=bot_client,
+                                bot_target_entity=bot_target_entity,
+                                messages=album_messages,
+                                captions=captions,
+                            )
+                            sent_target_ids = _extract_message_ids(send_result)
+                        except Exception:
+                            logging.exception(
+                                "Failed to send album as grouped media from %s; falling back to separate messages.",
+                                source_title,
+                            )
+                            for idx, message in enumerate(album_messages):
+                                try:
+                                    send_result = await _send_media_as_bot(
+                                        source_client=client,
+                                        bot_client=bot_client,
+                                        bot_target_entity=bot_target_entity,
+                                        message=message,
+                                        caption=captions[idx],
+                                    )
+                                    sent_message_id = _extract_message_id(send_result)
+                                    if sent_message_id is not None:
+                                        sent_target_ids.append(sent_message_id)
+                                except Exception:
+                                    logging.exception(
+                                        "Failed to send album item %s from %s",
+                                        idx + 1,
+                                        source_title,
+                                    )
+                    else:
+                        try:
+                            send_result = await client.send_file(
+                                target_entity,
+                                file=[message.media for message in album_messages],
+                                caption=captions,
+                                link_preview=False,
+                                parse_mode="html",
+                            )
+                            sent_target_ids = _extract_message_ids(send_result)
+                        except Exception:
+                            logging.exception(
+                                "Failed to send album as grouped media from %s; falling back to separate messages.",
+                                source_title,
+                            )
+                            for idx, message in enumerate(album_messages):
+                                try:
+                                    send_result = await client.send_file(
+                                        target_entity,
+                                        file=message.media,
+                                        caption=captions[idx],
+                                        link_preview=False,
+                                        parse_mode="html",
+                                    )
+                                    sent_message_id = _extract_message_id(send_result)
+                                    if sent_message_id is not None:
+                                        sent_target_ids.append(sent_message_id)
+                                except Exception:
+                                    logging.exception(
+                                        "Failed to send album item %s from %s",
+                                        idx + 1,
+                                        source_title,
+                                    )
 
-                if (
-                    message_map_store is not None
-                    and event.chat_id is not None
-                    and sent_target_ids
-                ):
-                    for source_message, target_message_id in zip(album_messages, sent_target_ids):
-                        await message_map_store.set(event.chat_id, source_message.id, target_message_id)
+                    if (
+                        message_map_store is not None
+                        and event.chat_id is not None
+                        and sent_target_ids
+                    ):
+                        for source_message, target_message_id in zip(album_messages, sent_target_ids):
+                            await message_map_store.set(event.chat_id, source_message.id, target_message_id)
+                    telegram_sent = bool(sent_target_ids)
+                except Exception as exc:
+                    logging.exception("Failed Telegram album forwarding from %s: %s", source_title, exc)
 
-                logging.info("Forwarded album from %s", source_title)
-            except Exception as exc:
-                logging.exception("Failed to forward album from %s: %s", source_title, exc)
+            if settings.email_forwarding_enabled and email_sender is not None:
+                try:
+                    body_parts: list[str] = []
+                    body_parts.append(
+                        _format_prefixed_plain(
+                            source_title,
+                            (album_messages[0].message or "").strip(),
+                            quote_text=first_reply_quote_text,
+                            message_url=first_message_url,
+                        )
+                    )
+                    for idx, album_message in enumerate(album_messages[1:], start=2):
+                        extra_text = (album_message.message or "").strip()
+                        if extra_text:
+                            body_parts.append(f"[item {idx}]\n{extra_text}")
+                    album_body = "\n\n".join(part for part in body_parts if part.strip())
+
+                    with tempfile.TemporaryDirectory(prefix="tgfwd_email_album_") as temp_dir:
+                        attachments: list[tuple[str, str]] = []
+                        for idx, album_message in enumerate(album_messages):
+                            safe_name = _safe_media_filename(album_message)
+                            file_hint = os.path.join(temp_dir, f"{idx:02d}_{safe_name}")
+                            downloaded = await _download_media_to_path(client, album_message, file_hint)
+                            attachments.append((downloaded, os.path.basename(downloaded)))
+
+                        await email_sender.send(
+                            subject=_build_email_subject(settings.email_subject_prefix, source_title),
+                            body=album_body,
+                            attachments=attachments,
+                        )
+                    email_sent = True
+                except Exception as exc:
+                    logging.exception("Failed email album forwarding from %s: %s", source_title, exc)
+
+            if telegram_sent or email_sent:
+                logging.info(
+                    "Forwarded album from %s%s%s",
+                    source_title,
+                    " [telegram]" if telegram_sent else "",
+                    " [email]" if email_sent else "",
+                )
 
     @client.on(events.NewMessage(outgoing=True))
     async def pm_my_activity_handler(event: events.NewMessage.Event) -> None:
@@ -1339,6 +1616,8 @@ async def main() -> None:
             alert_text = f"{sender_label} sent a new message"
         else:
             alert_text = f"{sender_label} отправил(-а) новое сообщение"
+        telegram_sent = False
+        email_sent = False
 
         try:
             sent_message = await bot_client.send_message(pm_alert_target_entity, alert_text, link_preview=False)
@@ -1350,9 +1629,27 @@ async def main() -> None:
                 and sent_message_id is not None
             ):
                 await pm_alert_messages_store.add(pm_alert_target_peer_id, sent_message_id)
-            logging.info("Sent PM alert for %s", sender_label)
+            telegram_sent = True
         except Exception as exc:
-            logging.exception("Failed to send PM alert for %s: %s", sender_label, exc)
+            logging.exception("Failed to send PM alert to Telegram for %s: %s", sender_label, exc)
+
+        if settings.email_pm_alerts_enabled and email_sender is not None:
+            try:
+                await email_sender.send(
+                    subject=_build_email_subject(settings.email_subject_prefix, "PM Alert"),
+                    body=alert_text,
+                )
+                email_sent = True
+            except Exception as exc:
+                logging.exception("Failed to send PM alert email for %s: %s", sender_label, exc)
+
+        if telegram_sent or email_sent:
+            logging.info(
+                "Sent PM alert for %s%s%s",
+                sender_label,
+                " [telegram]" if telegram_sent else "",
+                " [email]" if email_sent else "",
+            )
 
     if settings.forwarding_enabled:
         @client.on(events.MessageEdited(chats=source_entities))
