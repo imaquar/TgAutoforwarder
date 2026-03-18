@@ -1088,7 +1088,8 @@ async def main() -> None:
 
     source_entities: list[Any] = []
     target_entity: Any | None = None
-    if settings.forwarding_enabled or settings.email_forwarding_enabled:
+    source_delivery_enabled = settings.forwarding_enabled or settings.email_forwarding_enabled
+    if source_delivery_enabled:
         source_entities = await _resolve_entities(client, settings.source_chats)
         if settings.forwarding_enabled:
             target_entity = await client.get_entity(settings.target_chat)
@@ -1146,7 +1147,7 @@ async def main() -> None:
 
     source_peer_ids: set[int] = set()
     target_peer_id: int | None = None
-    if settings.forwarding_enabled or settings.email_forwarding_enabled:
+    if source_delivery_enabled:
         source_peer_ids = {get_peer_id(entity) for entity in source_entities}
     if settings.forwarding_enabled:
         try:
@@ -1243,7 +1244,7 @@ async def main() -> None:
                 settings.pm_alerts_auto_delete_after_hours,
             )
 
-    if settings.forwarding_enabled:
+    if source_delivery_enabled:
         def _passes_forward_filters(chat_id: int | None, sender_id: int | None, is_out: bool) -> bool:
             if chat_id is None:
                 return False
