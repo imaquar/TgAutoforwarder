@@ -44,6 +44,9 @@ class Settings:
     pm_alerts_lang: str
     pm_alerts_file: str
     pm_alerts_exclude_chats: list[str]
+    pm_alert_require_my_silence: bool
+    pm_alert_min_silence_after_my_message_minutes: int
+    pm_alert_my_activity_file: str
     pm_alerts_auto_delete_enabled: bool
     pm_alerts_auto_delete_hour: int
     pm_alerts_auto_delete_minute: int
@@ -186,6 +189,58 @@ class PmAlertCooldownStore:
             self._prune_old_records_locked(cooldown_seconds)
             self._save()
             return True
+
+
+class PmAlertMyActivityStore:
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._lock = asyncio.Lock()
+        self._data: dict[str, int] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not os.path.exists(self.path):
+            return
+
+        try:
+            with open(self.path, "r", encoding="utf-8") as file_obj:
+                payload = json.load(file_obj)
+            if isinstance(payload, dict):
+                self._data = {
+                    str(key): int(value)
+                    for key, value in payload.items()
+                    if isinstance(value, int)
+                }
+        except Exception as exc:
+            logging.warning("Failed to load PM alerts my-activity file %s: %s", self.path, exc)
+            self._data = {}
+
+    def _save(self) -> None:
+        temp_path = f"{self.path}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as file_obj:
+            json.dump(self._data, file_obj)
+        os.replace(temp_path, self.path)
+
+    def _prune_old_records_locked(self) -> None:
+        keep_for = 7 * 24 * 60 * 60
+        cutoff = int(time.time()) - keep_for
+        keys_to_remove = [key for key, ts in self._data.items() if ts < cutoff]
+        for key in keys_to_remove:
+            self._data.pop(key, None)
+
+    async def touch_my_message(self, peer_id: int) -> None:
+        async with self._lock:
+            self._data[str(peer_id)] = int(time.time())
+            self._prune_old_records_locked()
+            self._save()
+
+    async def has_required_silence(self, peer_id: int, min_silence_seconds: int) -> bool:
+        async with self._lock:
+            last_ts = self._data.get(str(peer_id))
+            if last_ts is None:
+                return True
+            now = int(time.time())
+            return (now - last_ts) >= min_silence_seconds
 
 
 class PmAlertMessagesStore:
@@ -384,6 +439,7 @@ def load_settings(require_routing: bool = True) -> Settings:
     bot_target_chat_raw = (os.getenv("BOT_TARGET_CHAT") or "").strip()
     pm_alerts_enabled = _parse_bool(os.getenv("PM_ALERTS_ENABLED"), default=False)
     pm_alert_target_chat_raw = (os.getenv("PM_ALERT_TARGET_CHAT") or "").strip()
+    pm_alert_require_my_silence = _parse_bool(os.getenv("PM_ALERT_REQUIRE_MY_SILENCE"), default=False)
     pm_alerts_auto_delete_enabled = _parse_bool(os.getenv("PM_ALERTS_AUTO_DELETE_ENABLED"), default=False)
 
     if not api_id_raw:
@@ -409,6 +465,11 @@ def load_settings(require_routing: bool = True) -> Settings:
         default=24,
         var_name="PM_ALERTS_AUTO_DELETE_AFTER_HOURS",
     )
+    pm_alert_min_silence_after_my_message_minutes = _parse_non_negative_int(
+        os.getenv("PM_ALERT_MIN_SILENCE_AFTER_MY_MESSAGE_MINUTES"),
+        default=30,
+        var_name="PM_ALERT_MIN_SILENCE_AFTER_MY_MESSAGE_MINUTES",
+    )
 
     source_chats: list[str] = [item.strip() for item in source_chats_raw.split(",") if item.strip()]
     target_chat_ref: str | int | None = _coerce_ref(target_chat.strip()) if target_chat.strip() else None
@@ -425,6 +486,8 @@ def load_settings(require_routing: bool = True) -> Settings:
 
     if pm_alerts_auto_delete_enabled and not pm_alerts_enabled:
         raise ValueError("PM_ALERTS_AUTO_DELETE_ENABLED=true requires PM_ALERTS_ENABLED=true")
+    if pm_alert_require_my_silence and not pm_alerts_enabled:
+        raise ValueError("PM_ALERT_REQUIRE_MY_SILENCE=true requires PM_ALERTS_ENABLED=true")
 
     if pm_alerts_auto_delete_after_hours > 48:
         raise ValueError("PM_ALERTS_AUTO_DELETE_AFTER_HOURS cannot be greater than 48")
@@ -475,6 +538,9 @@ def load_settings(require_routing: bool = True) -> Settings:
         pm_alerts_lang=_parse_pm_alerts_lang(os.getenv("PM_ALERTS_LANG")),
         pm_alerts_file=os.getenv("PM_ALERTS_FILE", f"{session_name}_pm_alerts.json"),
         pm_alerts_exclude_chats=_parse_refs_csv(os.getenv("PM_ALERTS_EXCLUDE_CHATS")),
+        pm_alert_require_my_silence=pm_alert_require_my_silence,
+        pm_alert_min_silence_after_my_message_minutes=pm_alert_min_silence_after_my_message_minutes,
+        pm_alert_my_activity_file=os.getenv("PM_ALERT_MY_ACTIVITY_FILE", f"{session_name}_pm_alerts_my_activity.json"),
         pm_alerts_auto_delete_enabled=pm_alerts_auto_delete_enabled,
         pm_alerts_auto_delete_hour=pm_alerts_auto_delete_hour,
         pm_alerts_auto_delete_minute=pm_alerts_auto_delete_minute,
@@ -864,6 +930,7 @@ async def main() -> None:
     pm_alert_target_entity: Any | None = None
     pm_alert_target_peer_id: int | None = None
     pm_alerts_store: PmAlertCooldownStore | None = None
+    pm_alert_my_activity_store: PmAlertMyActivityStore | None = None
     pm_alert_messages_store: PmAlertMessagesStore | None = None
     pm_alerts_auto_delete_task: asyncio.Task[Any] | None = None
     pm_alert_excluded_chat_ids: set[int] = set()
@@ -887,6 +954,8 @@ async def main() -> None:
         pm_alert_target_entity = await bot_client.get_entity(settings.pm_alert_target_chat)
         pm_alert_target_peer_id = get_peer_id(pm_alert_target_entity)
         pm_alerts_store = PmAlertCooldownStore(settings.pm_alerts_file)
+        if settings.pm_alert_require_my_silence:
+            pm_alert_my_activity_store = PmAlertMyActivityStore(settings.pm_alert_my_activity_file)
         if settings.pm_alerts_auto_delete_enabled:
             pm_alert_messages_store = PmAlertMessagesStore(settings.pm_alerts_auto_delete_file)
             pm_alerts_auto_delete_task = asyncio.create_task(
@@ -959,6 +1028,11 @@ async def main() -> None:
             settings.pm_alert_cooldown_minutes,
             settings.pm_alerts_lang,
         )
+        if settings.pm_alert_require_my_silence:
+            logging.info(
+                "PM alerts sender silence enabled: min %s minute(s) since your last PM message",
+                settings.pm_alert_min_silence_after_my_message_minutes,
+            )
         if pm_alert_excluded_chat_ids:
             logging.info(
                 "PM alerts exclusions enabled: %s chat(s)",
@@ -1206,6 +1280,23 @@ async def main() -> None:
             except Exception as exc:
                 logging.exception("Failed to forward album from %s: %s", source_title, exc)
 
+    @client.on(events.NewMessage(outgoing=True))
+    async def pm_my_activity_handler(event: events.NewMessage.Event) -> None:
+        if not settings.pm_alerts_enabled or not settings.pm_alert_require_my_silence:
+            return
+        if pm_alert_my_activity_store is None:
+            return
+        if not event.is_private:
+            return
+
+        message = event.message
+        if message is None or message.action is not None:
+            return
+        if event.chat_id is None:
+            return
+
+        await pm_alert_my_activity_store.touch_my_message(event.chat_id)
+
     @client.on(events.NewMessage(incoming=True))
     async def pm_alerts_handler(event: events.NewMessage.Event) -> None:
         if not settings.pm_alerts_enabled or pm_alerts_store is None:
@@ -1229,6 +1320,14 @@ async def main() -> None:
         if event.sender_id is None:
             return
 
+        if settings.pm_alert_require_my_silence and pm_alert_my_activity_store is not None:
+            peer_for_silence = event.chat_id or event.sender_id
+            if peer_for_silence is None:
+                return
+            min_silence_seconds = settings.pm_alert_min_silence_after_my_message_minutes * 60
+            has_silence = await pm_alert_my_activity_store.has_required_silence(peer_for_silence, min_silence_seconds)
+            if not has_silence:
+                return
         cooldown_seconds = settings.pm_alert_cooldown_minutes * 60
         should_notify = await pm_alerts_store.should_notify(event.sender_id, cooldown_seconds)
         if not should_notify:

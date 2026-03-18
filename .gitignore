@@ -4,6 +4,8 @@ __pycache__/
 *.session-journal
 *_message_map.json
 *_pm_alerts.json
+*_pm_alerts_messages.json
+*_pm_alerts_my_activity.json
 .DS_Store
 .env
 .venv/

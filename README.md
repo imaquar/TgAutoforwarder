@@ -110,6 +110,9 @@ PM_ALERT_TARGET_CHAT=
 PM_ALERT_COOLDOWN_MINUTES=60
 PM_ALERTS_LANG=eng
 PM_ALERTS_FILE=autoforwarder_pm_alerts.json
+PM_ALERT_REQUIRE_MY_SILENCE=false
+PM_ALERT_MIN_SILENCE_AFTER_MY_MESSAGE_MINUTES=30
+PM_ALERT_MY_ACTIVITY_FILE=autoforwarder_pm_alerts_my_activity.json
 PM_ALERTS_AUTO_DELETE_ENABLED=false
 PM_ALERTS_AUTO_DELETE_TIME=05:00
 PM_ALERTS_AUTO_DELETE_AFTER_HOURS=24
@@ -124,6 +127,9 @@ PM_ALERTS_EXCLUDE_CHATS=@john,123456789
 - Example: `60` means one alert per sender per 60 minutes, `0` disables cooldown.
 - `PM_ALERTS_LANG`: alert text language (`eng` or `ru`).
 - `PM_ALERTS_FILE`: file with cooldown state, so limits survive restarts.
+- `PM_ALERT_REQUIRE_MY_SILENCE`: extra guard for active dialogs.
+- `PM_ALERT_MIN_SILENCE_AFTER_MY_MESSAGE_MINUTES`: PM alert is sent only if you did not message that chat for at least N minutes.
+- `PM_ALERT_MY_ACTIVITY_FILE`: file with timestamps of your own PM activity.
 - `PM_ALERTS_AUTO_DELETE_ENABLED`: enable scheduled deletion of PM alert messages.
 - `PM_ALERTS_AUTO_DELETE_TIME`: daily delete time (`HH:MM`, server local time), for example `05:00`.
 - `PM_ALERTS_AUTO_DELETE_AFTER_HOURS`: delete alerts older than this number of hours.
