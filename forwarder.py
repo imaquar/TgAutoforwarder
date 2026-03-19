@@ -1135,12 +1135,10 @@ def _format_pm_alert_email_item(message: types.Message) -> tuple[str, bool]:
         return ("[sticker]", False)
     if is_voice or is_video_note:
         return ("[voice message]", False)
-    if has_photo:
-        return (normalized_text or "[photo]", True)
-    if has_document:
-        return (normalized_text or "[file]", True)
+    if has_photo or has_document:
+        return ("[file]", False)
     if message.media is not None:
-        return (normalized_text or "[media message]", False)
+        return ("[file]", False)
     if normalized_text:
         return (normalized_text, False)
     return ("[empty message]", False)
@@ -1328,7 +1326,6 @@ async def _pm_alerts_auto_delete_loop(
 
 async def _email_pm_alerts_batch_loop(
     *,
-    client: TelegramClient,
     email_sender: EmailSender,
     batch_store: EmailPmBatchStore,
 ) -> None:
@@ -1344,45 +1341,15 @@ async def _email_pm_alerts_batch_loop(
                 body_lines = [str(item["line"]) for item in items]
                 body = "\n".join(body_lines)
                 try:
-                    attachments: list[tuple[str, str]] = []
-                    with tempfile.TemporaryDirectory(prefix="tgfwd_pm_email_batch_") as temp_dir:
-                        for idx, item in enumerate(items):
-                            if not bool(item.get("attach_media", False)):
-                                continue
-                            chat_id = int(item.get("chat_id", 0))
-                            message_id = int(item.get("message_id", 0))
-                            if chat_id == 0 or message_id == 0:
-                                continue
-                            try:
-                                media_message = await client.get_messages(chat_id, ids=message_id)
-                                if isinstance(media_message, list):
-                                    media_message = media_message[0] if media_message else None
-                                if media_message is None or getattr(media_message, "media", None) is None:
-                                    continue
-                                safe_name = _safe_media_filename(media_message)
-                                file_hint = os.path.join(temp_dir, f"{idx:02d}_{safe_name}")
-                                downloaded = await _download_media_to_path(client, media_message, file_hint)
-                                attachments.append((downloaded, os.path.basename(downloaded)))
-                            except Exception as exc:
-                                logging.exception(
-                                    "Failed to attach PM media %s/%s for %s: %s",
-                                    chat_id,
-                                    message_id,
-                                    sender_label,
-                                    exc,
-                                )
-
-                        await email_sender.send(
-                            subject=sender_label,
-                            body=body,
-                            attachments=attachments,
-                        )
+                    await email_sender.send(
+                        subject=sender_label,
+                        body=body,
+                    )
                     await batch_store.remove(sender_id)
                     logging.info(
-                        "Sent batched PM alert email for %s (%s lines, %s attachment(s))",
+                        "Sent batched PM alert email for %s (%s lines)",
                         sender_label,
                         len(body_lines),
-                        len(attachments),
                     )
                 except Exception as exc:
                     logging.exception(
@@ -1495,7 +1462,6 @@ async def main() -> None:
         email_pm_alerts_batch_store = EmailPmBatchStore(settings.email_pm_alerts_batch_file)
         email_pm_alerts_batch_task = asyncio.create_task(
             _email_pm_alerts_batch_loop(
-                client=client,
                 email_sender=email_sender,
                 batch_store=email_pm_alerts_batch_store,
             )
