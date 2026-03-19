@@ -203,6 +203,17 @@ class PmAlertCooldownStore:
             self._save()
             return True
 
+    async def get_last_alert_ts(self, sender_id: int) -> int | None:
+        async with self._lock:
+            last_alert = self._data.get(str(sender_id))
+            return int(last_alert) if isinstance(last_alert, int) else None
+
+    async def touch_alert(self, sender_id: int, cooldown_seconds: int) -> None:
+        async with self._lock:
+            self._data[str(sender_id)] = int(time.time())
+            self._prune_old_records_locked(cooldown_seconds)
+            self._save()
+
 
 class PmAlertMyActivityStore:
     def __init__(self, path: str) -> None:
@@ -254,6 +265,11 @@ class PmAlertMyActivityStore:
                 return True
             now = int(time.time())
             return (now - last_ts) >= min_silence_seconds
+
+    async def get_last_my_message_ts(self, peer_id: int) -> int | None:
+        async with self._lock:
+            last_ts = self._data.get(str(peer_id))
+            return int(last_ts) if isinstance(last_ts, int) else None
 
 
 class PmAlertMessagesStore:
@@ -1926,13 +1942,18 @@ async def main() -> None:
         if event.sender_id is None:
             return
 
+        now_ts = int(time.time())
+        last_my_message_ts: int | None = None
         if settings.pm_alert_require_my_silence and pm_alert_my_activity_store is not None:
             peer_for_silence = event.chat_id or event.sender_id
             if peer_for_silence is None:
                 return
             min_silence_seconds = settings.pm_alert_min_silence_after_my_message_minutes * 60
-            has_silence = await pm_alert_my_activity_store.has_required_silence(peer_for_silence, min_silence_seconds)
-            if not has_silence:
+            last_my_message_ts = await pm_alert_my_activity_store.get_last_my_message_ts(peer_for_silence)
+            if (
+                last_my_message_ts is not None
+                and (now_ts - last_my_message_ts) < min_silence_seconds
+            ):
                 return
 
         sender = await event.get_sender()
@@ -1949,7 +1970,16 @@ async def main() -> None:
                 logging.error("PM alerts cooldown store is not initialized")
                 return
             cooldown_seconds = settings.pm_alert_cooldown_minutes * 60
-            should_notify = await pm_alerts_store.should_notify(event.sender_id, cooldown_seconds)
+            should_notify = True
+            last_alert_ts = await pm_alerts_store.get_last_alert_ts(event.sender_id)
+            if cooldown_seconds > 0 and last_alert_ts is not None:
+                # Unified behavior: if you have replied after the previous alert,
+                # start a new dialog cycle and ignore old sender cooldown.
+                if (
+                    last_my_message_ts is None
+                    or last_my_message_ts <= last_alert_ts
+                ):
+                    should_notify = (now_ts - last_alert_ts) >= cooldown_seconds
             if should_notify:
                 try:
                     sent_message = await bot_client.send_message(pm_alert_target_entity, alert_text, link_preview=False)
@@ -1961,6 +1991,7 @@ async def main() -> None:
                         and sent_message_id is not None
                     ):
                         await pm_alert_messages_store.add(pm_alert_target_peer_id, sent_message_id)
+                    await pm_alerts_store.touch_alert(event.sender_id, cooldown_seconds)
                     telegram_sent = True
                 except Exception as exc:
                     logging.exception("Failed to send PM alert to Telegram for %s: %s", sender_label, exc)

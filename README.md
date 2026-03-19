@@ -125,6 +125,8 @@ PM_ALERTS_EXCLUDE_CHATS=@john,123456789
 - `PM_ALERTS_ENABLED`: turns private-message alerts on/off.
 - `PM_ALERT_TARGET_CHAT`: where Telegram PM alerts are sent. If empty, fallback is `BOT_TARGET_CHAT` then `TARGET_CHAT`.
 - `PM_ALERT_COOLDOWN_MINUTES`: minimum interval between Telegram PM alerts from the same sender.
+- When `PM_ALERT_REQUIRE_MY_SILENCE=true`, your new outgoing message starts a new dialog cycle:
+  old sender cooldown from before your reply no longer blocks the next alert after silence window.
 - Example: `60` means one alert per sender per 60 minutes, `0` disables cooldown.
 - `PM_ALERTS_LANG`: alert text language (`eng` or `ru`).
 - `PM_ALERTS_FILE`: file with cooldown state, so limits survive restarts.
