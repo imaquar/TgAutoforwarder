@@ -54,6 +54,9 @@ class Settings:
     pm_alerts_auto_delete_minute: int
     pm_alerts_auto_delete_after_hours: int
     pm_alerts_auto_delete_file: str
+    pm_alert_deferred_unread_enabled: bool
+    pm_alert_deferred_unread_minutes: int
+    pm_alert_deferred_unread_file: str
     email_forwarding_enabled: bool
     email_pm_alerts_batch_enabled: bool
     email_pm_alerts_batch_minutes: int
@@ -357,6 +360,128 @@ class PmAlertMessagesStore:
                 self._data.pop(chat_key, None)
             self._prune_old_records_locked()
             self._save()
+
+
+class PmAlertDeferredStore:
+    def __init__(self, path: str, keep_days: int = 7) -> None:
+        self.path = path
+        self.keep_seconds = keep_days * 24 * 60 * 60
+        self._lock = asyncio.Lock()
+        self._data: dict[str, dict[str, Any]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not os.path.exists(self.path):
+            return
+
+        try:
+            with open(self.path, "r", encoding="utf-8") as file_obj:
+                payload = json.load(file_obj)
+            if isinstance(payload, dict):
+                normalized: dict[str, dict[str, Any]] = {}
+                for sender_id, value in payload.items():
+                    if not isinstance(value, dict):
+                        continue
+                    peer_id = value.get("peer_id")
+                    message_id = value.get("message_id")
+                    sender_label = value.get("sender_label")
+                    due_at = value.get("due_at")
+                    updated_at = value.get("updated_at")
+                    if (
+                        isinstance(peer_id, int)
+                        and isinstance(message_id, int)
+                        and isinstance(sender_label, str)
+                        and isinstance(due_at, int)
+                        and isinstance(updated_at, int)
+                    ):
+                        normalized[str(sender_id)] = {
+                            "peer_id": peer_id,
+                            "message_id": message_id,
+                            "sender_label": sender_label.strip() or str(sender_id),
+                            "due_at": due_at,
+                            "updated_at": updated_at,
+                        }
+                self._data = normalized
+                self._prune_old_records_locked()
+                self._save()
+        except Exception as exc:
+            logging.warning("Failed to load deferred PM alerts file %s: %s", self.path, exc)
+            self._data = {}
+
+    def _save(self) -> None:
+        temp_path = f"{self.path}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as file_obj:
+            json.dump(self._data, file_obj)
+        os.replace(temp_path, self.path)
+
+    def _prune_old_records_locked(self) -> None:
+        cutoff = int(time.time()) - self.keep_seconds
+        keys_to_remove = [
+            key
+            for key, value in self._data.items()
+            if int(value.get("updated_at", 0)) < cutoff
+        ]
+        for key in keys_to_remove:
+            self._data.pop(key, None)
+
+    async def upsert(
+        self,
+        *,
+        sender_id: int,
+        peer_id: int,
+        message_id: int,
+        sender_label: str,
+        due_at: int,
+    ) -> None:
+        async with self._lock:
+            self._data[str(sender_id)] = {
+                "peer_id": peer_id,
+                "message_id": message_id,
+                "sender_label": sender_label.strip() or str(sender_id),
+                "due_at": due_at,
+                "updated_at": int(time.time()),
+            }
+            self._prune_old_records_locked()
+            self._save()
+
+    async def remove(self, sender_id: int) -> None:
+        async with self._lock:
+            self._data.pop(str(sender_id), None)
+            self._prune_old_records_locked()
+            self._save()
+
+    async def get_due_entries(self, now_ts: int) -> list[tuple[int, int, int, str]]:
+        async with self._lock:
+            result: list[tuple[int, int, int, str]] = []
+            for sender_key, value in self._data.items():
+                due_at = value.get("due_at")
+                peer_id = value.get("peer_id")
+                message_id = value.get("message_id")
+                sender_label = value.get("sender_label")
+                if (
+                    isinstance(due_at, int)
+                    and due_at <= now_ts
+                    and isinstance(peer_id, int)
+                    and isinstance(message_id, int)
+                    and isinstance(sender_label, str)
+                ):
+                    try:
+                        sender_id = int(sender_key)
+                    except ValueError:
+                        continue
+                    result.append((sender_id, peer_id, message_id, sender_label))
+            return result
+
+    async def next_due_ts(self) -> int | None:
+        async with self._lock:
+            due_candidates = [
+                int(value["due_at"])
+                for value in self._data.values()
+                if isinstance(value, dict) and isinstance(value.get("due_at"), int)
+            ]
+            if not due_candidates:
+                return None
+            return min(due_candidates)
 
 
 class EmailPmBatchStore:
@@ -782,6 +907,7 @@ def load_settings(require_routing: bool = True) -> Settings:
     pm_alert_target_chat_raw = (os.getenv("PM_ALERT_TARGET_CHAT") or "").strip()
     pm_alert_require_my_silence = _parse_bool(os.getenv("PM_ALERT_REQUIRE_MY_SILENCE"), default=False)
     pm_alerts_auto_delete_enabled = _parse_bool(os.getenv("PM_ALERTS_AUTO_DELETE_ENABLED"), default=False)
+    pm_alert_deferred_unread_enabled = _parse_bool(os.getenv("PM_ALERT_DEFERRED_UNREAD_ENABLED"), default=False)
     email_forwarding_enabled = _parse_bool(os.getenv("EMAIL_FORWARDING_ENABLED"), default=False)
     email_pm_alerts_batch_enabled = _parse_bool(os.getenv("EMAIL_PM_ALERTS_BATCH_ENABLED"), default=False)
     email_smtp_host = (os.getenv("EMAIL_SMTP_HOST") or "").strip() or None
@@ -819,6 +945,11 @@ def load_settings(require_routing: bool = True) -> Settings:
         default=30,
         var_name="PM_ALERT_MIN_SILENCE_AFTER_MY_MESSAGE_MINUTES",
     )
+    pm_alert_deferred_unread_minutes = _parse_non_negative_int(
+        os.getenv("PM_ALERT_DEFERRED_UNREAD_MINUTES"),
+        default=10,
+        var_name="PM_ALERT_DEFERRED_UNREAD_MINUTES",
+    )
     email_pm_alerts_batch_minutes = _parse_non_negative_int(
         os.getenv("EMAIL_PM_ALERTS_BATCH_MINUTES"),
         default=10,
@@ -848,6 +979,8 @@ def load_settings(require_routing: bool = True) -> Settings:
 
     if pm_alerts_auto_delete_enabled and not pm_alerts_enabled:
         raise ValueError("PM_ALERTS_AUTO_DELETE_ENABLED=true requires PM_ALERTS_ENABLED=true")
+    if pm_alert_deferred_unread_enabled and not pm_alerts_enabled:
+        raise ValueError("PM_ALERT_DEFERRED_UNREAD_ENABLED=true requires PM_ALERTS_ENABLED=true")
     if pm_alert_require_my_silence and not pm_alerts_active:
         raise ValueError("PM_ALERT_REQUIRE_MY_SILENCE=true requires PM alerts delivery enabled")
     if email_pm_alerts_batch_enabled and email_pm_alerts_batch_minutes < 1:
@@ -857,6 +990,8 @@ def load_settings(require_routing: bool = True) -> Settings:
         raise ValueError("PM_ALERTS_AUTO_DELETE_AFTER_HOURS cannot be greater than 48")
     if pm_alerts_auto_delete_enabled and pm_alerts_auto_delete_after_hours < 1:
         raise ValueError("PM_ALERTS_AUTO_DELETE_AFTER_HOURS must be at least 1 when PM alerts auto-delete is enabled")
+    if pm_alert_deferred_unread_enabled and pm_alert_deferred_unread_minutes < 1:
+        raise ValueError("PM_ALERT_DEFERRED_UNREAD_MINUTES must be at least 1 when deferred unread alerts are enabled")
 
     if (forwarding_enabled and delivery_mode == "bot") or pm_alerts_enabled:
         if not bot_token:
@@ -927,6 +1062,12 @@ def load_settings(require_routing: bool = True) -> Settings:
         pm_alerts_auto_delete_minute=pm_alerts_auto_delete_minute,
         pm_alerts_auto_delete_after_hours=pm_alerts_auto_delete_after_hours,
         pm_alerts_auto_delete_file=os.getenv("PM_ALERTS_AUTO_DELETE_FILE", f"{session_name}_pm_alerts_messages.json"),
+        pm_alert_deferred_unread_enabled=pm_alert_deferred_unread_enabled,
+        pm_alert_deferred_unread_minutes=pm_alert_deferred_unread_minutes,
+        pm_alert_deferred_unread_file=os.getenv(
+            "PM_ALERT_DEFERRED_UNREAD_FILE",
+            f"{session_name}_pm_alerts_deferred_unread.json",
+        ),
         email_forwarding_enabled=email_forwarding_enabled,
         email_pm_alerts_batch_enabled=email_pm_alerts_batch_enabled,
         email_pm_alerts_batch_minutes=email_pm_alerts_batch_minutes,
@@ -1160,6 +1301,35 @@ def _format_pm_alert_email_item(message: types.Message) -> tuple[str, bool]:
     return ("[empty message]", False)
 
 
+def _build_pm_alert_text(sender_label: str, lang: str) -> str:
+    if lang == "eng":
+        return f"{sender_label} sent a new message"
+    return f"{sender_label} отправил(-а) новое сообщение"
+
+
+async def _should_send_telegram_pm_alert(
+    *,
+    settings: Settings,
+    pm_alerts_store: PmAlertCooldownStore,
+    sender_id: int,
+    now_ts: int,
+    last_my_message_ts: int | None,
+) -> bool:
+    cooldown_seconds = settings.pm_alert_cooldown_minutes * 60
+    if cooldown_seconds <= 0:
+        return True
+
+    last_alert_ts = await pm_alerts_store.get_last_alert_ts(sender_id)
+    if last_alert_ts is None:
+        return True
+
+    # Unified behavior: if you replied after previous alert,
+    # start a new dialog cycle and ignore old sender cooldown.
+    if last_my_message_ts is not None and last_my_message_ts > last_alert_ts:
+        return True
+    return (now_ts - last_alert_ts) >= cooldown_seconds
+
+
 async def _get_reply_quote_text(message: types.Message) -> str | None:
     reply_to_message_id = getattr(message, "reply_to_msg_id", None)
     if reply_to_message_id is None:
@@ -1295,6 +1465,36 @@ def _chunked(items: list[int], chunk_size: int) -> Iterable[list[int]]:
         yield items[idx: idx + chunk_size]
 
 
+async def _send_telegram_pm_alert(
+    *,
+    bot_client: TelegramClient,
+    pm_alert_target_entity: Any,
+    pm_alert_target_peer_id: int | None,
+    pm_alert_messages_store: PmAlertMessagesStore | None,
+    pm_alerts_store: PmAlertCooldownStore,
+    settings: Settings,
+    sender_id: int,
+    sender_label: str,
+    alert_text: str,
+) -> bool:
+    cooldown_seconds = settings.pm_alert_cooldown_minutes * 60
+    try:
+        sent_message = await bot_client.send_message(pm_alert_target_entity, alert_text, link_preview=False)
+        sent_message_id = _extract_message_id(sent_message)
+        if (
+            settings.pm_alerts_auto_delete_enabled
+            and pm_alert_messages_store is not None
+            and pm_alert_target_peer_id is not None
+            and sent_message_id is not None
+        ):
+            await pm_alert_messages_store.add(pm_alert_target_peer_id, sent_message_id)
+        await pm_alerts_store.touch_alert(sender_id, cooldown_seconds)
+        return True
+    except Exception as exc:
+        logging.exception("Failed to send PM alert to Telegram for %s: %s", sender_label, exc)
+        return False
+
+
 async def _pm_alerts_auto_delete_loop(
     *,
     bot_client: TelegramClient,
@@ -1338,6 +1538,106 @@ async def _pm_alerts_auto_delete_loop(
                 logging.exception("PM alerts auto-delete failed for a batch: %s", exc)
 
         logging.info("PM alerts auto-delete: deleted %s message(s)", deleted_count)
+
+
+async def _pm_alerts_deferred_unread_loop(
+    *,
+    client: TelegramClient,
+    bot_client: TelegramClient,
+    settings: Settings,
+    pm_alert_target_entity: Any,
+    pm_alert_target_peer_id: int | None,
+    pm_alerts_store: PmAlertCooldownStore,
+    pm_alert_messages_store: PmAlertMessagesStore | None,
+    pm_alert_my_activity_store: PmAlertMyActivityStore | None,
+    deferred_store: PmAlertDeferredStore,
+) -> None:
+    idle_sleep_seconds = 5
+    logging.info(
+        "Deferred unread PM alerts enabled: %s minute(s), file=%s",
+        settings.pm_alert_deferred_unread_minutes,
+        settings.pm_alert_deferred_unread_file,
+    )
+
+    while True:
+        now_ts = int(time.time())
+        due_entries = await deferred_store.get_due_entries(now_ts)
+        if due_entries:
+            for sender_id, peer_id, message_id, sender_label in due_entries:
+                try:
+                    message = await client.get_messages(peer_id, ids=message_id)
+                    if isinstance(message, list):
+                        message = message[0] if message else None
+                    if message is None:
+                        await deferred_store.remove(sender_id)
+                        continue
+
+                    if not bool(getattr(message, "unread", False)):
+                        await deferred_store.remove(sender_id)
+                        continue
+
+                    last_my_message_ts: int | None = None
+                    if settings.pm_alert_require_my_silence and pm_alert_my_activity_store is not None:
+                        min_silence_seconds = settings.pm_alert_min_silence_after_my_message_minutes * 60
+                        last_my_message_ts = await pm_alert_my_activity_store.get_last_my_message_ts(peer_id)
+                        if (
+                            last_my_message_ts is not None
+                            and (now_ts - last_my_message_ts) < min_silence_seconds
+                        ):
+                            next_due = now_ts + settings.pm_alert_deferred_unread_minutes * 60
+                            await deferred_store.upsert(
+                                sender_id=sender_id,
+                                peer_id=peer_id,
+                                message_id=message_id,
+                                sender_label=sender_label,
+                                due_at=next_due,
+                            )
+                            continue
+
+                    should_notify = await _should_send_telegram_pm_alert(
+                        settings=settings,
+                        pm_alerts_store=pm_alerts_store,
+                        sender_id=sender_id,
+                        now_ts=now_ts,
+                        last_my_message_ts=last_my_message_ts,
+                    )
+                    if not should_notify:
+                        next_due = now_ts + max(60, settings.pm_alert_cooldown_minutes * 60)
+                        await deferred_store.upsert(
+                            sender_id=sender_id,
+                            peer_id=peer_id,
+                            message_id=message_id,
+                            sender_label=sender_label,
+                            due_at=next_due,
+                        )
+                        continue
+
+                    alert_text = _build_pm_alert_text(sender_label, settings.pm_alerts_lang)
+                    sent = await _send_telegram_pm_alert(
+                        bot_client=bot_client,
+                        pm_alert_target_entity=pm_alert_target_entity,
+                        pm_alert_target_peer_id=pm_alert_target_peer_id,
+                        pm_alert_messages_store=pm_alert_messages_store,
+                        pm_alerts_store=pm_alerts_store,
+                        settings=settings,
+                        sender_id=sender_id,
+                        sender_label=sender_label,
+                        alert_text=alert_text,
+                    )
+                    if sent:
+                        await deferred_store.remove(sender_id)
+                        logging.info("Sent deferred unread PM alert for %s", sender_label)
+                except Exception as exc:
+                    logging.exception("Deferred unread PM alerts loop failed for %s: %s", sender_label, exc)
+            continue
+
+        next_due_ts = await deferred_store.next_due_ts()
+        if next_due_ts is None:
+            await asyncio.sleep(idle_sleep_seconds)
+            continue
+
+        sleep_seconds = max(1, min(idle_sleep_seconds, next_due_ts - int(time.time())))
+        await asyncio.sleep(sleep_seconds)
 
 
 async def _email_pm_alerts_batch_loop(
@@ -1431,7 +1731,9 @@ async def main() -> None:
     pm_alerts_store: PmAlertCooldownStore | None = None
     pm_alert_my_activity_store: PmAlertMyActivityStore | None = None
     pm_alert_messages_store: PmAlertMessagesStore | None = None
+    pm_alert_deferred_store: PmAlertDeferredStore | None = None
     pm_alerts_auto_delete_task: asyncio.Task[Any] | None = None
+    pm_alerts_deferred_task: asyncio.Task[Any] | None = None
     email_pm_alerts_batch_store: EmailPmBatchStore | None = None
     email_pm_alerts_batch_task: asyncio.Task[Any] | None = None
     pm_alert_excluded_chat_ids: set[int] = set()
@@ -1474,6 +1776,25 @@ async def main() -> None:
         if settings.pm_alerts_exclude_chats:
             excluded_entities = await _resolve_entities(client, settings.pm_alerts_exclude_chats)
             pm_alert_excluded_chat_ids = {get_peer_id(entity) for entity in excluded_entities}
+        if (
+            settings.pm_alerts_enabled
+            and settings.pm_alert_deferred_unread_enabled
+            and pm_alerts_store is not None
+        ):
+            pm_alert_deferred_store = PmAlertDeferredStore(settings.pm_alert_deferred_unread_file)
+            pm_alerts_deferred_task = asyncio.create_task(
+                _pm_alerts_deferred_unread_loop(
+                    client=client,
+                    bot_client=bot_client,
+                    settings=settings,
+                    pm_alert_target_entity=pm_alert_target_entity,
+                    pm_alert_target_peer_id=pm_alert_target_peer_id,
+                    pm_alerts_store=pm_alerts_store,
+                    pm_alert_messages_store=pm_alert_messages_store,
+                    pm_alert_my_activity_store=pm_alert_my_activity_store,
+                    deferred_store=pm_alert_deferred_store,
+                )
+            )
     if settings.email_pm_alerts_batch_enabled and email_sender is not None:
         email_pm_alerts_batch_store = EmailPmBatchStore(settings.email_pm_alerts_batch_file)
         email_pm_alerts_batch_task = asyncio.create_task(
@@ -1587,6 +1908,17 @@ async def main() -> None:
                 settings.pm_alerts_auto_delete_minute,
                 settings.pm_alerts_auto_delete_after_hours,
             )
+        if settings.pm_alert_deferred_unread_enabled:
+            logging.info(
+                "PM alerts deferred unread enabled: %s minute(s), file=%s",
+                settings.pm_alert_deferred_unread_minutes,
+                settings.pm_alert_deferred_unread_file,
+            )
+            if not settings.pm_alert_require_my_silence:
+                logging.warning(
+                    "PM_ALERT_DEFERRED_UNREAD_ENABLED=true but PM_ALERT_REQUIRE_MY_SILENCE=false. "
+                    "Deferred unread queue will normally stay unused."
+                )
 
     if source_delivery_enabled:
         def _passes_forward_filters(chat_id: int | None, sender_id: int | None, is_out: bool) -> bool:
@@ -1943,58 +2275,75 @@ async def main() -> None:
             return
 
         now_ts = int(time.time())
+        peer_for_silence = event.chat_id or event.sender_id
+        if peer_for_silence is None:
+            return
         last_my_message_ts: int | None = None
+        silence_blocked = False
         if settings.pm_alert_require_my_silence and pm_alert_my_activity_store is not None:
-            peer_for_silence = event.chat_id or event.sender_id
-            if peer_for_silence is None:
-                return
             min_silence_seconds = settings.pm_alert_min_silence_after_my_message_minutes * 60
             last_my_message_ts = await pm_alert_my_activity_store.get_last_my_message_ts(peer_for_silence)
             if (
                 last_my_message_ts is not None
                 and (now_ts - last_my_message_ts) < min_silence_seconds
             ):
-                return
+                silence_blocked = True
 
         sender = await event.get_sender()
         sender_label = _entity_label(sender)
-        if settings.pm_alerts_lang == "eng":
-            alert_text = f"{sender_label} sent a new message"
-        else:
-            alert_text = f"{sender_label} отправил(-а) новое сообщение"
+        alert_text = _build_pm_alert_text(sender_label, settings.pm_alerts_lang)
         telegram_sent = False
         email_queued = False
+
+        if (
+            settings.pm_alerts_enabled
+            and silence_blocked
+            and settings.pm_alert_deferred_unread_enabled
+            and pm_alert_deferred_store is not None
+        ):
+            due_at = now_ts + settings.pm_alert_deferred_unread_minutes * 60
+            await pm_alert_deferred_store.upsert(
+                sender_id=event.sender_id,
+                peer_id=peer_for_silence,
+                message_id=message.id,
+                sender_label=sender_label,
+                due_at=due_at,
+            )
+            due_dt = datetime.fromtimestamp(due_at).strftime("%Y-%m-%d %H:%M:%S")
+            logging.info(
+                "Queued deferred unread PM alert for %s (check at %s)",
+                sender_label,
+                due_dt,
+            )
+
+        if silence_blocked:
+            return
 
         if settings.pm_alerts_enabled:
             if pm_alerts_store is None:
                 logging.error("PM alerts cooldown store is not initialized")
                 return
-            cooldown_seconds = settings.pm_alert_cooldown_minutes * 60
-            should_notify = True
-            last_alert_ts = await pm_alerts_store.get_last_alert_ts(event.sender_id)
-            if cooldown_seconds > 0 and last_alert_ts is not None:
-                # Unified behavior: if you have replied after the previous alert,
-                # start a new dialog cycle and ignore old sender cooldown.
-                if (
-                    last_my_message_ts is None
-                    or last_my_message_ts <= last_alert_ts
-                ):
-                    should_notify = (now_ts - last_alert_ts) >= cooldown_seconds
+            should_notify = await _should_send_telegram_pm_alert(
+                settings=settings,
+                pm_alerts_store=pm_alerts_store,
+                sender_id=event.sender_id,
+                now_ts=now_ts,
+                last_my_message_ts=last_my_message_ts,
+            )
             if should_notify:
-                try:
-                    sent_message = await bot_client.send_message(pm_alert_target_entity, alert_text, link_preview=False)
-                    sent_message_id = _extract_message_id(sent_message)
-                    if (
-                        settings.pm_alerts_auto_delete_enabled
-                        and pm_alert_messages_store is not None
-                        and pm_alert_target_peer_id is not None
-                        and sent_message_id is not None
-                    ):
-                        await pm_alert_messages_store.add(pm_alert_target_peer_id, sent_message_id)
-                    await pm_alerts_store.touch_alert(event.sender_id, cooldown_seconds)
-                    telegram_sent = True
-                except Exception as exc:
-                    logging.exception("Failed to send PM alert to Telegram for %s: %s", sender_label, exc)
+                telegram_sent = await _send_telegram_pm_alert(
+                    bot_client=bot_client,
+                    pm_alert_target_entity=pm_alert_target_entity,
+                    pm_alert_target_peer_id=pm_alert_target_peer_id,
+                    pm_alert_messages_store=pm_alert_messages_store,
+                    pm_alerts_store=pm_alerts_store,
+                    settings=settings,
+                    sender_id=event.sender_id,
+                    sender_label=sender_label,
+                    alert_text=alert_text,
+                )
+                if telegram_sent and pm_alert_deferred_store is not None:
+                    await pm_alert_deferred_store.remove(event.sender_id)
 
         if settings.email_pm_alerts_batch_enabled and email_pm_alerts_batch_store is not None:
             try:
@@ -2085,6 +2434,10 @@ async def main() -> None:
             pm_alerts_auto_delete_task.cancel()
             with suppress(asyncio.CancelledError):
                 await pm_alerts_auto_delete_task
+        if pm_alerts_deferred_task is not None:
+            pm_alerts_deferred_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await pm_alerts_deferred_task
         if email_pm_alerts_batch_task is not None:
             email_pm_alerts_batch_task.cancel()
             with suppress(asyncio.CancelledError):

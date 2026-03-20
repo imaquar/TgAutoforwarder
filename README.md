@@ -118,6 +118,9 @@ PM_ALERTS_AUTO_DELETE_ENABLED=false
 PM_ALERTS_AUTO_DELETE_TIME=05:00
 PM_ALERTS_AUTO_DELETE_AFTER_HOURS=24
 PM_ALERTS_AUTO_DELETE_FILE=autoforwarder_pm_alerts_messages.json
+PM_ALERT_DEFERRED_UNREAD_ENABLED=false
+PM_ALERT_DEFERRED_UNREAD_MINUTES=10
+PM_ALERT_DEFERRED_UNREAD_FILE=autoforwarder_pm_alerts_deferred_unread.json
 # optional ignore list
 PM_ALERTS_EXCLUDE_CHATS=@john,123456789
 ```
@@ -139,6 +142,10 @@ PM_ALERTS_EXCLUDE_CHATS=@john,123456789
 - `PM_ALERTS_AUTO_DELETE_AFTER_HOURS`: delete alerts older than this number of hours.
 - Maximum for `PM_ALERTS_AUTO_DELETE_AFTER_HOURS` is `48` hours.
 - `PM_ALERTS_AUTO_DELETE_FILE`: file with PM alert message IDs used by auto-delete.
+- `PM_ALERT_DEFERRED_UNREAD_ENABLED`: if alert was blocked by `PM_ALERT_REQUIRE_MY_SILENCE`, queue and retry later while message stays unread.
+- `PM_ALERT_DEFERRED_UNREAD_MINUTES`: retry interval for deferred unread queue.
+- `PM_ALERT_DEFERRED_UNREAD_FILE`: deferred unread queue storage.
+- Deferred queue keeps one active record per sender to avoid duplicate alerts for the same pending thread.
 - `PM_ALERTS_EXCLUDE_CHATS`: users/chats to ignore for PM alerts.
 
 PM alerts text:
