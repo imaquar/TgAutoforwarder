@@ -11,6 +11,7 @@ Telegram autoforwarder on Python + Telethon.
 - In `DELIVERY_MODE=user`, marks target dialog as unread after forwarding.
 - Syncs edits: when source message is edited, forwarded text/caption is updated (`user` and `bot` modes).
 - Optional PM alerts with cooldown, language (`eng` / `ru`), and scheduled auto-delete.
+- Optional PM alerts target read-state sync (mark target chat read after tracked alerts are read).
 - Optional email delivery for source forwarding and debounced PM alert batches.
 - Supports login by phone code or QR (`AUTH_MODE=qr`).
 
@@ -121,6 +122,9 @@ PM_ALERTS_AUTO_DELETE_FILE=autoforwarder_pm_alerts_messages.json
 PM_ALERT_DEFERRED_UNREAD_ENABLED=false
 PM_ALERT_DEFERRED_UNREAD_MINUTES=10
 PM_ALERT_DEFERRED_UNREAD_FILE=autoforwarder_pm_alerts_deferred_unread.json
+PM_ALERTS_SYNC_TARGET_READ_STATE_ENABLED=false
+PM_ALERTS_SYNC_TARGET_READ_STATE_CHECK_SECONDS=10
+PM_ALERTS_SYNC_TARGET_READ_STATE_FILE=autoforwarder_pm_alerts_read_sync.json
 # optional ignore list
 PM_ALERTS_EXCLUDE_CHATS=@john,123456789
 ```
@@ -146,6 +150,9 @@ PM_ALERTS_EXCLUDE_CHATS=@john,123456789
 - `PM_ALERT_DEFERRED_UNREAD_MINUTES`: retry interval for deferred unread queue.
 - `PM_ALERT_DEFERRED_UNREAD_FILE`: deferred unread queue storage.
 - Deferred queue keeps one active record per sender to avoid duplicate alerts for the same pending thread.
+- `PM_ALERTS_SYNC_TARGET_READ_STATE_ENABLED`: track Telegram PM alerts in target chat and mark target chat as read when all tracked alerts are read.
+- `PM_ALERTS_SYNC_TARGET_READ_STATE_CHECK_SECONDS`: polling interval for read-state sync.
+- `PM_ALERTS_SYNC_TARGET_READ_STATE_FILE`: storage for tracked PM alert ids used by read-state sync.
 - `PM_ALERTS_EXCLUDE_CHATS`: users/chats to ignore for PM alerts.
 
 PM alerts text:

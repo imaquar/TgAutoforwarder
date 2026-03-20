@@ -54,6 +54,9 @@ class Settings:
     pm_alerts_auto_delete_minute: int
     pm_alerts_auto_delete_after_hours: int
     pm_alerts_auto_delete_file: str
+    pm_alert_sync_target_read_state_enabled: bool
+    pm_alert_sync_target_read_state_file: str
+    pm_alert_sync_target_read_state_check_seconds: int
     pm_alert_deferred_unread_enabled: bool
     pm_alert_deferred_unread_minutes: int
     pm_alert_deferred_unread_file: str
@@ -360,6 +363,94 @@ class PmAlertMessagesStore:
                 self._data.pop(chat_key, None)
             self._prune_old_records_locked()
             self._save()
+
+
+class PmAlertReadSyncStore:
+    def __init__(self, path: str, keep_days: int = 30) -> None:
+        self.path = path
+        self.keep_seconds = keep_days * 24 * 60 * 60
+        self._lock = asyncio.Lock()
+        self._data: dict[str, dict[str, int]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not os.path.exists(self.path):
+            return
+
+        try:
+            with open(self.path, "r", encoding="utf-8") as file_obj:
+                payload = json.load(file_obj)
+            if isinstance(payload, dict):
+                normalized: dict[str, dict[str, int]] = {}
+                for chat_id, bucket in payload.items():
+                    if not isinstance(bucket, dict):
+                        continue
+                    normalized_bucket: dict[str, int] = {
+                        str(message_id): int(created_ts)
+                        for message_id, created_ts in bucket.items()
+                        if isinstance(created_ts, int)
+                    }
+                    if normalized_bucket:
+                        normalized[str(chat_id)] = normalized_bucket
+                self._data = normalized
+                self._prune_old_records_locked()
+                self._save()
+        except Exception as exc:
+            logging.warning("Failed to load PM alerts read-sync file %s: %s", self.path, exc)
+            self._data = {}
+
+    def _save(self) -> None:
+        temp_path = f"{self.path}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as file_obj:
+            json.dump(self._data, file_obj)
+        os.replace(temp_path, self.path)
+
+    def _prune_old_records_locked(self) -> None:
+        cutoff = int(time.time()) - self.keep_seconds
+        empty_chat_ids: list[str] = []
+        for chat_id, bucket in self._data.items():
+            old_message_ids = [message_id for message_id, created_ts in bucket.items() if created_ts < cutoff]
+            for message_id in old_message_ids:
+                bucket.pop(message_id, None)
+            if not bucket:
+                empty_chat_ids.append(chat_id)
+        for chat_id in empty_chat_ids:
+            self._data.pop(chat_id, None)
+
+    async def add(self, chat_id: int, message_id: int) -> None:
+        async with self._lock:
+            chat_key = str(chat_id)
+            bucket = self._data.setdefault(chat_key, {})
+            bucket[str(message_id)] = int(time.time())
+            self._prune_old_records_locked()
+            self._save()
+
+    async def list_ids(self, chat_id: int) -> list[int]:
+        async with self._lock:
+            bucket = self._data.get(str(chat_id), {})
+            ids = [int(message_id) for message_id in bucket.keys() if str(message_id).isdigit()]
+            ids.sort()
+            return ids
+
+    async def remove_many(self, chat_id: int, message_ids: list[int]) -> None:
+        if not message_ids:
+            return
+        async with self._lock:
+            chat_key = str(chat_id)
+            bucket = self._data.get(chat_key)
+            if not bucket:
+                return
+            for message_id in message_ids:
+                bucket.pop(str(message_id), None)
+            if not bucket:
+                self._data.pop(chat_key, None)
+            self._prune_old_records_locked()
+            self._save()
+
+    async def count(self, chat_id: int) -> int:
+        async with self._lock:
+            bucket = self._data.get(str(chat_id), {})
+            return len(bucket)
 
 
 class PmAlertDeferredStore:
@@ -907,6 +998,10 @@ def load_settings(require_routing: bool = True) -> Settings:
     pm_alert_target_chat_raw = (os.getenv("PM_ALERT_TARGET_CHAT") or "").strip()
     pm_alert_require_my_silence = _parse_bool(os.getenv("PM_ALERT_REQUIRE_MY_SILENCE"), default=False)
     pm_alerts_auto_delete_enabled = _parse_bool(os.getenv("PM_ALERTS_AUTO_DELETE_ENABLED"), default=False)
+    pm_alert_sync_target_read_state_enabled = _parse_bool(
+        os.getenv("PM_ALERTS_SYNC_TARGET_READ_STATE_ENABLED"),
+        default=False,
+    )
     pm_alert_deferred_unread_enabled = _parse_bool(os.getenv("PM_ALERT_DEFERRED_UNREAD_ENABLED"), default=False)
     email_forwarding_enabled = _parse_bool(os.getenv("EMAIL_FORWARDING_ENABLED"), default=False)
     email_pm_alerts_batch_enabled = _parse_bool(os.getenv("EMAIL_PM_ALERTS_BATCH_ENABLED"), default=False)
@@ -950,6 +1045,11 @@ def load_settings(require_routing: bool = True) -> Settings:
         default=10,
         var_name="PM_ALERT_DEFERRED_UNREAD_MINUTES",
     )
+    pm_alert_sync_target_read_state_check_seconds = _parse_non_negative_int(
+        os.getenv("PM_ALERTS_SYNC_TARGET_READ_STATE_CHECK_SECONDS"),
+        default=10,
+        var_name="PM_ALERTS_SYNC_TARGET_READ_STATE_CHECK_SECONDS",
+    )
     email_pm_alerts_batch_minutes = _parse_non_negative_int(
         os.getenv("EMAIL_PM_ALERTS_BATCH_MINUTES"),
         default=10,
@@ -979,6 +1079,8 @@ def load_settings(require_routing: bool = True) -> Settings:
 
     if pm_alerts_auto_delete_enabled and not pm_alerts_enabled:
         raise ValueError("PM_ALERTS_AUTO_DELETE_ENABLED=true requires PM_ALERTS_ENABLED=true")
+    if pm_alert_sync_target_read_state_enabled and not pm_alerts_enabled:
+        raise ValueError("PM_ALERTS_SYNC_TARGET_READ_STATE_ENABLED=true requires PM_ALERTS_ENABLED=true")
     if pm_alert_deferred_unread_enabled and not pm_alerts_enabled:
         raise ValueError("PM_ALERT_DEFERRED_UNREAD_ENABLED=true requires PM_ALERTS_ENABLED=true")
     if pm_alert_require_my_silence and not pm_alerts_active:
@@ -992,6 +1094,14 @@ def load_settings(require_routing: bool = True) -> Settings:
         raise ValueError("PM_ALERTS_AUTO_DELETE_AFTER_HOURS must be at least 1 when PM alerts auto-delete is enabled")
     if pm_alert_deferred_unread_enabled and pm_alert_deferred_unread_minutes < 1:
         raise ValueError("PM_ALERT_DEFERRED_UNREAD_MINUTES must be at least 1 when deferred unread alerts are enabled")
+    if (
+        pm_alert_sync_target_read_state_enabled
+        and pm_alert_sync_target_read_state_check_seconds < 1
+    ):
+        raise ValueError(
+            "PM_ALERTS_SYNC_TARGET_READ_STATE_CHECK_SECONDS must be at least 1 "
+            "when target read-state sync is enabled"
+        )
 
     if (forwarding_enabled and delivery_mode == "bot") or pm_alerts_enabled:
         if not bot_token:
@@ -1062,6 +1172,12 @@ def load_settings(require_routing: bool = True) -> Settings:
         pm_alerts_auto_delete_minute=pm_alerts_auto_delete_minute,
         pm_alerts_auto_delete_after_hours=pm_alerts_auto_delete_after_hours,
         pm_alerts_auto_delete_file=os.getenv("PM_ALERTS_AUTO_DELETE_FILE", f"{session_name}_pm_alerts_messages.json"),
+        pm_alert_sync_target_read_state_enabled=pm_alert_sync_target_read_state_enabled,
+        pm_alert_sync_target_read_state_file=os.getenv(
+            "PM_ALERTS_SYNC_TARGET_READ_STATE_FILE",
+            f"{session_name}_pm_alerts_read_sync.json",
+        ),
+        pm_alert_sync_target_read_state_check_seconds=pm_alert_sync_target_read_state_check_seconds,
         pm_alert_deferred_unread_enabled=pm_alert_deferred_unread_enabled,
         pm_alert_deferred_unread_minutes=pm_alert_deferred_unread_minutes,
         pm_alert_deferred_unread_file=os.getenv(
@@ -1471,6 +1587,7 @@ async def _send_telegram_pm_alert(
     pm_alert_target_entity: Any,
     pm_alert_target_peer_id: int | None,
     pm_alert_messages_store: PmAlertMessagesStore | None,
+    pm_alert_read_sync_store: PmAlertReadSyncStore | None,
     pm_alerts_store: PmAlertCooldownStore,
     settings: Settings,
     sender_id: int,
@@ -1488,6 +1605,13 @@ async def _send_telegram_pm_alert(
             and sent_message_id is not None
         ):
             await pm_alert_messages_store.add(pm_alert_target_peer_id, sent_message_id)
+        if (
+            settings.pm_alert_sync_target_read_state_enabled
+            and pm_alert_read_sync_store is not None
+            and pm_alert_target_peer_id is not None
+            and sent_message_id is not None
+        ):
+            await pm_alert_read_sync_store.add(pm_alert_target_peer_id, sent_message_id)
         await pm_alerts_store.touch_alert(sender_id, cooldown_seconds)
         return True
     except Exception as exc:
@@ -1549,6 +1673,7 @@ async def _pm_alerts_deferred_unread_loop(
     pm_alert_target_peer_id: int | None,
     pm_alerts_store: PmAlertCooldownStore,
     pm_alert_messages_store: PmAlertMessagesStore | None,
+    pm_alert_read_sync_store: PmAlertReadSyncStore | None,
     pm_alert_my_activity_store: PmAlertMyActivityStore | None,
     deferred_store: PmAlertDeferredStore,
 ) -> None:
@@ -1618,6 +1743,7 @@ async def _pm_alerts_deferred_unread_loop(
                         pm_alert_target_entity=pm_alert_target_entity,
                         pm_alert_target_peer_id=pm_alert_target_peer_id,
                         pm_alert_messages_store=pm_alert_messages_store,
+                        pm_alert_read_sync_store=pm_alert_read_sync_store,
                         pm_alerts_store=pm_alerts_store,
                         settings=settings,
                         sender_id=sender_id,
@@ -1638,6 +1764,69 @@ async def _pm_alerts_deferred_unread_loop(
 
         sleep_seconds = max(1, min(idle_sleep_seconds, next_due_ts - int(time.time())))
         await asyncio.sleep(sleep_seconds)
+
+
+async def _pm_alerts_sync_target_read_state_loop(
+    *,
+    client: TelegramClient,
+    pm_alert_target_entity_user: Any,
+    pm_alert_target_peer_id: int,
+    read_sync_store: PmAlertReadSyncStore,
+    check_seconds: int,
+) -> None:
+    logging.info(
+        "PM alerts target read-state sync enabled: check every %ss",
+        check_seconds,
+    )
+
+    while True:
+        try:
+            pending_ids = await read_sync_store.list_ids(pm_alert_target_peer_id)
+            if not pending_ids:
+                await asyncio.sleep(check_seconds)
+                continue
+
+            resolved_ids: list[int] = []
+            for batch in _chunked(pending_ids, 100):
+                messages = await client.get_messages(pm_alert_target_entity_user, ids=batch)
+                if messages is None:
+                    messages = []
+                if not isinstance(messages, list):
+                    messages = [messages]
+                by_id = {
+                    int(msg.id): msg
+                    for msg in messages
+                    if msg is not None and isinstance(getattr(msg, "id", None), int)
+                }
+
+                for message_id in batch:
+                    msg = by_id.get(message_id)
+                    if msg is None:
+                        resolved_ids.append(message_id)
+                        continue
+                    if not bool(getattr(msg, "unread", False)):
+                        resolved_ids.append(message_id)
+
+            if resolved_ids:
+                await read_sync_store.remove_many(pm_alert_target_peer_id, resolved_ids)
+
+            remaining_count = await read_sync_store.count(pm_alert_target_peer_id)
+            if remaining_count == 0:
+                try:
+                    await client(
+                        functions.messages.MarkDialogUnreadRequest(
+                            peer=pm_alert_target_entity_user,
+                            unread=False,
+                        )
+                    )
+                    logging.info("Marked PM alerts target chat as read after all tracked alerts were read")
+                except Exception as exc:
+                    logging.exception("Failed to mark PM alerts target chat as read: %s", exc)
+
+            await asyncio.sleep(check_seconds)
+        except Exception as exc:
+            logging.exception("PM alerts target read-state sync loop failed: %s", exc)
+            await asyncio.sleep(check_seconds)
 
 
 async def _email_pm_alerts_batch_loop(
@@ -1727,12 +1916,15 @@ async def main() -> None:
     message_map_store: MessageMapStore | None = None
     active_message_map_file: str | None = None
     pm_alert_target_entity: Any | None = None
+    pm_alert_target_entity_user: Any | None = None
     pm_alert_target_peer_id: int | None = None
     pm_alerts_store: PmAlertCooldownStore | None = None
     pm_alert_my_activity_store: PmAlertMyActivityStore | None = None
     pm_alert_messages_store: PmAlertMessagesStore | None = None
+    pm_alert_read_sync_store: PmAlertReadSyncStore | None = None
     pm_alert_deferred_store: PmAlertDeferredStore | None = None
     pm_alerts_auto_delete_task: asyncio.Task[Any] | None = None
+    pm_alerts_read_sync_task: asyncio.Task[Any] | None = None
     pm_alerts_deferred_task: asyncio.Task[Any] | None = None
     email_pm_alerts_batch_store: EmailPmBatchStore | None = None
     email_pm_alerts_batch_task: asyncio.Task[Any] | None = None
@@ -1756,8 +1948,11 @@ async def main() -> None:
     if pm_alerts_active:
         if settings.pm_alerts_enabled:
             pm_alert_target_entity = await bot_client.get_entity(settings.pm_alert_target_chat)
-            pm_alert_target_peer_id = get_peer_id(pm_alert_target_entity)
+            pm_alert_target_entity_user = await client.get_entity(settings.pm_alert_target_chat)
+            pm_alert_target_peer_id = get_peer_id(pm_alert_target_entity_user)
             pm_alerts_store = PmAlertCooldownStore(settings.pm_alerts_file)
+            if settings.pm_alert_sync_target_read_state_enabled:
+                pm_alert_read_sync_store = PmAlertReadSyncStore(settings.pm_alert_sync_target_read_state_file)
         if settings.pm_alert_require_my_silence:
             pm_alert_my_activity_store = PmAlertMyActivityStore(settings.pm_alert_my_activity_file)
         if settings.pm_alerts_auto_delete_enabled:
@@ -1791,8 +1986,25 @@ async def main() -> None:
                     pm_alert_target_peer_id=pm_alert_target_peer_id,
                     pm_alerts_store=pm_alerts_store,
                     pm_alert_messages_store=pm_alert_messages_store,
+                    pm_alert_read_sync_store=pm_alert_read_sync_store,
                     pm_alert_my_activity_store=pm_alert_my_activity_store,
                     deferred_store=pm_alert_deferred_store,
+                )
+            )
+        if (
+            settings.pm_alerts_enabled
+            and settings.pm_alert_sync_target_read_state_enabled
+            and pm_alert_read_sync_store is not None
+            and pm_alert_target_entity_user is not None
+            and pm_alert_target_peer_id is not None
+        ):
+            pm_alerts_read_sync_task = asyncio.create_task(
+                _pm_alerts_sync_target_read_state_loop(
+                    client=client,
+                    pm_alert_target_entity_user=pm_alert_target_entity_user,
+                    pm_alert_target_peer_id=pm_alert_target_peer_id,
+                    read_sync_store=pm_alert_read_sync_store,
+                    check_seconds=settings.pm_alert_sync_target_read_state_check_seconds,
                 )
             )
     if settings.email_pm_alerts_batch_enabled and email_sender is not None:
@@ -1919,6 +2131,12 @@ async def main() -> None:
                     "PM_ALERT_DEFERRED_UNREAD_ENABLED=true but PM_ALERT_REQUIRE_MY_SILENCE=false. "
                     "Deferred unread queue will normally stay unused."
                 )
+        if settings.pm_alert_sync_target_read_state_enabled:
+            logging.info(
+                "PM alerts target read-state sync enabled: check every %ss, file=%s",
+                settings.pm_alert_sync_target_read_state_check_seconds,
+                settings.pm_alert_sync_target_read_state_file,
+            )
 
     if source_delivery_enabled:
         def _passes_forward_filters(chat_id: int | None, sender_id: int | None, is_out: bool) -> bool:
@@ -2336,6 +2554,7 @@ async def main() -> None:
                     pm_alert_target_entity=pm_alert_target_entity,
                     pm_alert_target_peer_id=pm_alert_target_peer_id,
                     pm_alert_messages_store=pm_alert_messages_store,
+                    pm_alert_read_sync_store=pm_alert_read_sync_store,
                     pm_alerts_store=pm_alerts_store,
                     settings=settings,
                     sender_id=event.sender_id,
@@ -2434,6 +2653,10 @@ async def main() -> None:
             pm_alerts_auto_delete_task.cancel()
             with suppress(asyncio.CancelledError):
                 await pm_alerts_auto_delete_task
+        if pm_alerts_read_sync_task is not None:
+            pm_alerts_read_sync_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await pm_alerts_read_sync_task
         if pm_alerts_deferred_task is not None:
             pm_alerts_deferred_task.cancel()
             with suppress(asyncio.CancelledError):
