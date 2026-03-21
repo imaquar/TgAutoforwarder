@@ -370,7 +370,7 @@ class PmAlertReadSyncStore:
         self.path = path
         self.keep_seconds = keep_days * 24 * 60 * 60
         self._lock = asyncio.Lock()
-        self._data: dict[str, dict[str, int]] = {}
+        self._data: dict[str, dict[str, dict[str, int | None]]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -381,15 +381,32 @@ class PmAlertReadSyncStore:
             with open(self.path, "r", encoding="utf-8") as file_obj:
                 payload = json.load(file_obj)
             if isinstance(payload, dict):
-                normalized: dict[str, dict[str, int]] = {}
+                normalized: dict[str, dict[str, dict[str, int | None]]] = {}
                 for chat_id, bucket in payload.items():
                     if not isinstance(bucket, dict):
                         continue
-                    normalized_bucket: dict[str, int] = {
-                        str(message_id): int(created_ts)
-                        for message_id, created_ts in bucket.items()
-                        if isinstance(created_ts, int)
-                    }
+                    normalized_bucket: dict[str, dict[str, int | None]] = {}
+                    for message_id, value in bucket.items():
+                        if isinstance(value, int):
+                            # Backward compatibility with old format.
+                            normalized_bucket[str(message_id)] = {
+                                "created_at": int(value),
+                                "source_peer_id": None,
+                                "source_message_id": None,
+                            }
+                            continue
+                        if not isinstance(value, dict):
+                            continue
+                        created_at = value.get("created_at")
+                        source_peer_id = value.get("source_peer_id")
+                        source_message_id = value.get("source_message_id")
+                        if not isinstance(created_at, int):
+                            continue
+                        normalized_bucket[str(message_id)] = {
+                            "created_at": int(created_at),
+                            "source_peer_id": int(source_peer_id) if isinstance(source_peer_id, int) else None,
+                            "source_message_id": int(source_message_id) if isinstance(source_message_id, int) else None,
+                        }
                     if normalized_bucket:
                         normalized[str(chat_id)] = normalized_bucket
                 self._data = normalized
@@ -409,7 +426,11 @@ class PmAlertReadSyncStore:
         cutoff = int(time.time()) - self.keep_seconds
         empty_chat_ids: list[str] = []
         for chat_id, bucket in self._data.items():
-            old_message_ids = [message_id for message_id, created_ts in bucket.items() if created_ts < cutoff]
+            old_message_ids = [
+                message_id
+                for message_id, metadata in bucket.items()
+                if int(metadata.get("created_at", 0) or 0) < cutoff
+            ]
             for message_id in old_message_ids:
                 bucket.pop(message_id, None)
             if not bucket:
@@ -417,20 +438,43 @@ class PmAlertReadSyncStore:
         for chat_id in empty_chat_ids:
             self._data.pop(chat_id, None)
 
-    async def add(self, chat_id: int, message_id: int) -> None:
+    async def add(
+        self,
+        chat_id: int,
+        message_id: int,
+        *,
+        source_peer_id: int | None = None,
+        source_message_id: int | None = None,
+    ) -> None:
         async with self._lock:
             chat_key = str(chat_id)
             bucket = self._data.setdefault(chat_key, {})
-            bucket[str(message_id)] = int(time.time())
+            bucket[str(message_id)] = {
+                "created_at": int(time.time()),
+                "source_peer_id": source_peer_id,
+                "source_message_id": source_message_id,
+            }
             self._prune_old_records_locked()
             self._save()
 
-    async def list_ids(self, chat_id: int) -> list[int]:
+    async def list_entries(self, chat_id: int) -> list[tuple[int, int | None, int | None]]:
         async with self._lock:
             bucket = self._data.get(str(chat_id), {})
-            ids = [int(message_id) for message_id in bucket.keys() if str(message_id).isdigit()]
-            ids.sort()
-            return ids
+            entries: list[tuple[int, int | None, int | None]] = []
+            for message_id, metadata in bucket.items():
+                if not str(message_id).isdigit():
+                    continue
+                if not isinstance(metadata, dict):
+                    continue
+                entries.append(
+                    (
+                        int(message_id),
+                        int(metadata["source_peer_id"]) if isinstance(metadata.get("source_peer_id"), int) else None,
+                        int(metadata["source_message_id"]) if isinstance(metadata.get("source_message_id"), int) else None,
+                    )
+                )
+            entries.sort(key=lambda item: item[0])
+            return entries
 
     async def remove_many(self, chat_id: int, message_ids: list[int]) -> None:
         if not message_ids:
@@ -1593,6 +1637,8 @@ async def _send_telegram_pm_alert(
     sender_id: int,
     sender_label: str,
     alert_text: str,
+    source_peer_id: int | None = None,
+    source_message_id: int | None = None,
 ) -> bool:
     cooldown_seconds = settings.pm_alert_cooldown_minutes * 60
     try:
@@ -1611,7 +1657,12 @@ async def _send_telegram_pm_alert(
             and pm_alert_target_peer_id is not None
             and sent_message_id is not None
         ):
-            await pm_alert_read_sync_store.add(pm_alert_target_peer_id, sent_message_id)
+            await pm_alert_read_sync_store.add(
+                pm_alert_target_peer_id,
+                sent_message_id,
+                source_peer_id=source_peer_id,
+                source_message_id=source_message_id,
+            )
         await pm_alerts_store.touch_alert(sender_id, cooldown_seconds)
         return True
     except Exception as exc:
@@ -1749,6 +1800,8 @@ async def _pm_alerts_deferred_unread_loop(
                         sender_id=sender_id,
                         sender_label=sender_label,
                         alert_text=alert_text,
+                        source_peer_id=peer_id,
+                        source_message_id=message_id,
                     )
                     if sent:
                         await deferred_store.remove(sender_id)
@@ -1781,31 +1834,34 @@ async def _pm_alerts_sync_target_read_state_loop(
 
     while True:
         try:
-            pending_ids = await read_sync_store.list_ids(pm_alert_target_peer_id)
-            if not pending_ids:
+            pending_entries = await read_sync_store.list_entries(pm_alert_target_peer_id)
+            if not pending_entries:
                 await asyncio.sleep(check_seconds)
                 continue
 
             resolved_ids: list[int] = []
-            for batch in _chunked(pending_ids, 100):
-                messages = await client.get_messages(pm_alert_target_entity_user, ids=batch)
-                if messages is None:
-                    messages = []
-                if not isinstance(messages, list):
-                    messages = [messages]
-                by_id = {
-                    int(msg.id): msg
-                    for msg in messages
-                    if msg is not None and isinstance(getattr(msg, "id", None), int)
-                }
-
-                for message_id in batch:
-                    msg = by_id.get(message_id)
-                    if msg is None:
-                        resolved_ids.append(message_id)
+            for alert_message_id, source_peer_id, source_message_id in pending_entries:
+                if source_peer_id is None or source_message_id is None:
+                    # Legacy records from old format; drop them.
+                    resolved_ids.append(alert_message_id)
+                    continue
+                try:
+                    source_message = await client.get_messages(source_peer_id, ids=source_message_id)
+                    if isinstance(source_message, list):
+                        source_message = source_message[0] if source_message else None
+                    if source_message is None:
+                        resolved_ids.append(alert_message_id)
                         continue
-                    if not bool(getattr(msg, "unread", False)):
-                        resolved_ids.append(message_id)
+                    if not bool(getattr(source_message, "unread", False)):
+                        resolved_ids.append(alert_message_id)
+                        continue
+                except Exception as exc:
+                    logging.exception(
+                        "Failed to check source PM read state for %s/%s: %s",
+                        source_peer_id,
+                        source_message_id,
+                        exc,
+                    )
 
             if resolved_ids:
                 await read_sync_store.remove_many(pm_alert_target_peer_id, resolved_ids)
@@ -1819,7 +1875,7 @@ async def _pm_alerts_sync_target_read_state_loop(
                             unread=False,
                         )
                     )
-                    logging.info("Marked PM alerts target chat as read after all tracked alerts were read")
+                    logging.info("Marked PM alerts target chat as read after linked source PM messages were read")
                 except Exception as exc:
                     logging.exception("Failed to mark PM alerts target chat as read: %s", exc)
 
@@ -2560,6 +2616,8 @@ async def main() -> None:
                     sender_id=event.sender_id,
                     sender_label=sender_label,
                     alert_text=alert_text,
+                    source_peer_id=peer_for_silence,
+                    source_message_id=message.id,
                 )
                 if telegram_sent and pm_alert_deferred_store is not None:
                     await pm_alert_deferred_store.remove(event.sender_id)
