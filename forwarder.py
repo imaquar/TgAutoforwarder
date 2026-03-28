@@ -1846,24 +1846,20 @@ async def _pm_alerts_sync_target_read_state_loop(
                     resolved_ids.append(alert_message_id)
                     continue
                 try:
-                    source_message = await client.get_messages(source_peer_id, ids=source_message_id)
-                    if isinstance(source_message, list):
-                        source_message = source_message[0] if source_message else None
-                    if source_message is None:
-                        resolved_ids.append(alert_message_id)
-                        continue
-                    if not bool(getattr(source_message, "unread", False)):
-                        resolved_ids.append(alert_message_id)
-                        continue
-                except (ValueError, errors.PeerIdInvalidError) as exc:
-                    logging.warning(
-                        "Dropping PM alert read-sync record %s: source PM %s/%s is not resolvable: %s",
-                        alert_message_id,
-                        source_peer_id,
-                        source_message_id,
-                        exc,
+                    source_input_peer = await client.get_input_entity(source_peer_id)
+                    peer_dialogs = await client(
+                        functions.messages.GetPeerDialogsRequest(peers=[source_input_peer])
                     )
-                    resolved_ids.append(alert_message_id)
+                    source_dialog = peer_dialogs.dialogs[0] if peer_dialogs.dialogs else None
+                    if source_dialog is None:
+                        continue
+                    read_inbox_max_id = int(getattr(source_dialog, "read_inbox_max_id", 0) or 0)
+                    if source_message_id <= read_inbox_max_id:
+                        resolved_ids.append(alert_message_id)
+                        continue
+                except (ValueError, errors.PeerIdInvalidError):
+                    # Entity may be temporarily unavailable in cache after restart.
+                    # Keep the record and retry on the next loop to avoid false "read" marks.
                     continue
                 except Exception as exc:
                     logging.exception(
