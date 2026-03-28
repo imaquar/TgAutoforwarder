@@ -1855,6 +1855,16 @@ async def _pm_alerts_sync_target_read_state_loop(
                     if not bool(getattr(source_message, "unread", False)):
                         resolved_ids.append(alert_message_id)
                         continue
+                except (ValueError, errors.PeerIdInvalidError) as exc:
+                    logging.warning(
+                        "Dropping PM alert read-sync record %s: source PM %s/%s is not resolvable: %s",
+                        alert_message_id,
+                        source_peer_id,
+                        source_message_id,
+                        exc,
+                    )
+                    resolved_ids.append(alert_message_id)
+                    continue
                 except Exception as exc:
                     logging.exception(
                         "Failed to check source PM read state for %s/%s: %s",
@@ -1868,6 +1878,10 @@ async def _pm_alerts_sync_target_read_state_loop(
 
             remaining_count = await read_sync_store.count(pm_alert_target_peer_id)
             if remaining_count == 0:
+                try:
+                    await client.send_read_acknowledge(pm_alert_target_entity_user, clear_mentions=True)
+                except Exception as exc:
+                    logging.exception("Failed to send read acknowledge for PM alerts target chat: %s", exc)
                 try:
                     await client(
                         functions.messages.MarkDialogUnreadRequest(
