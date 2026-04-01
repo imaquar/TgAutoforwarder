@@ -395,7 +395,7 @@ async def main() -> None:
                         except Exception:
                             sent_msg = await bot_client.send_message(
                                 bot_target_entity,
-                                formatted_prefix_only,
+                                formatted_text,
                                 link_preview=False,
                                 parse_mode="html",
                             )
