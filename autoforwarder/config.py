@@ -5,7 +5,7 @@ import os
 from dotenv import load_dotenv
 
 
-
+@dataclass
 class Settings:
     api_id: int
     api_hash: str
@@ -160,6 +160,15 @@ def _parse_chat_allowed_senders(raw: str | None) -> dict[str, list[str]]:
         result[chat_ref.strip()] = normalized_refs
 
     return result
+
+
+def _coerce_ref(chat_ref: str | int) -> str | int:
+    if isinstance(chat_ref, int):
+        return chat_ref
+    try:
+        return int(chat_ref)
+    except ValueError:
+        return chat_ref
 
 
 def load_settings(require_routing: bool = True) -> Settings:

@@ -4,13 +4,13 @@ from getpass import getpass
 import html
 import logging
 import os
+import sys
 import tempfile
 import time
 from typing import Any, Iterable
 
 import qrcode
 from telethon import TelegramClient, errors, functions, types
-from telethon.tl.custom import Dialog
 from telethon.utils import get_peer_id
 
 from .config import Settings
