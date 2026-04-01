@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from getpass import getpass
 import html
 import logging
+import mimetypes
 import os
 import sys
 import tempfile
