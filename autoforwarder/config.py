@@ -13,7 +13,6 @@ class Settings:
     forwarding_enabled: bool
     source_chats: list[str]
     target_chat: str | int | None
-    delivery_mode: str
     bot_token: str | None
     bot_target_chat: str | int | None
     auth_mode: str
@@ -21,7 +20,6 @@ class Settings:
     allowed_senders: list[str]
     chat_allowed_senders: dict[str, list[str]]
     message_map_file_bot: str
-    message_map_file_user: str
     message_map_ttl_days: int
     pm_alerts_enabled: bool
     pm_alert_target_chat: str | int | None
@@ -66,13 +64,6 @@ def _parse_auth_mode(value: str | None) -> str:
     mode = (value or "phone").strip().lower()
     if mode not in {"phone", "qr"}:
         raise ValueError("AUTH_MODE must be either 'phone' or 'qr'")
-    return mode
-
-
-def _parse_delivery_mode(value: str | None) -> str:
-    mode = (value or "user").strip().lower()
-    if mode not in {"user", "bot"}:
-        raise ValueError("DELIVERY_MODE must be either 'user' or 'bot'")
     return mode
 
 
@@ -179,7 +170,6 @@ def load_settings(require_routing: bool = True) -> Settings:
     source_chats_raw = os.getenv("SOURCE_CHATS", "")
     target_chat = os.getenv("TARGET_CHAT", "")
     forwarding_enabled = _parse_bool(os.getenv("FORWARDING_ENABLED"), default=True)
-    delivery_mode = _parse_delivery_mode(os.getenv("DELIVERY_MODE"))
     bot_token = (os.getenv("BOT_TOKEN") or "").strip() or None
     bot_target_chat_raw = (os.getenv("BOT_TARGET_CHAT") or "").strip()
     pm_alerts_enabled = _parse_bool(os.getenv("PM_ALERTS_ENABLED"), default=False)
@@ -212,7 +202,6 @@ def load_settings(require_routing: bool = True) -> Settings:
 
     session_name = os.getenv("SESSION_NAME", "autoforwarder")
     default_message_map_file_bot = f"{session_name}_message_map_bot.json"
-    default_message_map_file_user = f"{session_name}_message_map_user.json"
     pm_alerts_auto_delete_hour, pm_alerts_auto_delete_minute = _parse_time_of_day(
         os.getenv("PM_ALERTS_AUTO_DELETE_TIME"),
         var_name="PM_ALERTS_AUTO_DELETE_TIME",
@@ -291,10 +280,10 @@ def load_settings(require_routing: bool = True) -> Settings:
             "when target read-state sync is enabled"
         )
 
-    if (forwarding_enabled and delivery_mode == "bot") or pm_alerts_enabled:
+    if forwarding_enabled or pm_alerts_enabled:
         if not bot_token:
             raise ValueError(
-                "Environment variable BOT_TOKEN is required when DELIVERY_MODE=bot and forwarding is enabled, "
+                "Environment variable BOT_TOKEN is required when forwarding is enabled "
                 "or when PM alerts Telegram delivery is enabled (PM_ALERTS_ENABLED=true)"
             )
 
@@ -312,7 +301,7 @@ def load_settings(require_routing: bool = True) -> Settings:
         if email_smtp_username and not email_smtp_password:
             raise ValueError("EMAIL_SMTP_PASSWORD is required when EMAIL_SMTP_USERNAME is set")
 
-    if forwarding_enabled and delivery_mode == "bot":
+    if forwarding_enabled:
         bot_target_chat_ref = bot_target_chat_ref or target_chat_ref
 
     if pm_alerts_enabled:
@@ -328,7 +317,6 @@ def load_settings(require_routing: bool = True) -> Settings:
         forwarding_enabled=forwarding_enabled,
         source_chats=source_chats,
         target_chat=target_chat_ref,
-        delivery_mode=delivery_mode,
         bot_token=bot_token,
         bot_target_chat=bot_target_chat_ref,
         auth_mode=_parse_auth_mode(os.getenv("AUTH_MODE")),
@@ -336,7 +324,6 @@ def load_settings(require_routing: bool = True) -> Settings:
         allowed_senders=_parse_refs_csv(os.getenv("ALLOWED_SENDERS")),
         chat_allowed_senders=_parse_chat_allowed_senders(os.getenv("CHAT_ALLOWED_SENDERS")),
         message_map_file_bot=(os.getenv("MESSAGE_MAP_FILE_BOT") or "").strip() or default_message_map_file_bot,
-        message_map_file_user=(os.getenv("MESSAGE_MAP_FILE_USER") or "").strip() or default_message_map_file_user,
         message_map_ttl_days=_parse_non_negative_int(
             os.getenv("MESSAGE_MAP_TTL_DAYS"),
             default=7,

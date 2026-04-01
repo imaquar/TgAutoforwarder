@@ -4,12 +4,11 @@ Telegram autoforwarder on Python + Telethon.
 
 ## Features
 - Listens for new messages in `SOURCE_CHATS`.
-- Sends them to `TARGET_CHAT` from your user account or from a bot.
+- Sends them to `TARGET_CHAT` via bot delivery.
 - Adds a `[Source Chat Name]` prefix to message text/caption.
 - For reply messages, includes quoted original message under the `[Source Chat Name]` prefix.
 - Preserves grouped media (albums) as grouped messages in target chat.
-- In `DELIVERY_MODE=user`, marks target dialog as unread after forwarding.
-- Syncs edits: when source message is edited, forwarded text/caption is updated (`user` and `bot` modes).
+- Syncs edits: when source message is edited, forwarded text/caption is updated.
 - Optional PM alerts with cooldown, language (`eng` / `ru`), and scheduled auto-delete.
 - Optional PM alerts target read-state sync (mark target chat read after linked source PMs are read).
 - Optional email delivery for source forwarding and debounced PM alert batches.
@@ -55,35 +54,24 @@ SKIP_OUTGOING=true
 - `SKIP_OUTGOING=true` means your own outgoing messages from `SOURCE_CHATS` will be ignored.  
 - Set `SKIP_OUTGOING=false` if you want to forward your own messages too.
 
-## 5. Delivery mode
-
-User mode:
+## 5. Bot delivery
 
 ```env
-DELIVERY_MODE=user
-```
-
-Bot mode:
-
-```env
-DELIVERY_MODE=bot
 BOT_TOKEN=123456:your_bot_token
 # optional, if empty TARGET_CHAT is used
 BOT_TARGET_CHAT=
 ```
 
-`BOT_TOKEN` is required when `DELIVERY_MODE=bot`.
+`BOT_TOKEN` is required when `FORWARDING_ENABLED=true` (and for Telegram PM alerts when `PM_ALERTS_ENABLED=true`).
 
 ## 6. Edit sync map storage
 
 ```env
-MESSAGE_MAP_FILE_USER=autoforwarder_message_map_user.json
 MESSAGE_MAP_FILE_BOT=autoforwarder_message_map_bot.json
 MESSAGE_MAP_TTL_DAYS=7
 ```
 
-- `MESSAGE_MAP_FILE_USER`: where mapping is stored in `DELIVERY_MODE=user`.
-- `MESSAGE_MAP_FILE_BOT`: where mapping is stored in `DELIVERY_MODE=bot`.
+- `MESSAGE_MAP_FILE_BOT`: where bot forwarding edit-sync mapping is stored.
 - `MESSAGE_MAP_TTL_DAYS`: auto-cleanup for old mapping records.
 - Example: `7` means delete records older than 7 days, `0` disables cleanup.
 
@@ -233,7 +221,6 @@ python forwarder.py --list-chats --list-limit 500
 
 ## 12. Notes
 
-- In `DELIVERY_MODE=user`, target chat is marked unread after forwarding.
 - Edit sync works for messages that were forwarded while map file was maintained.
 - `MESSAGE_MAP_TTL_DAYS=0` disables cleanup.
 - Some media types may not support caption edits on Telegram side.
