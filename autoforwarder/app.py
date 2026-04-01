@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 from telethon import TelegramClient, errors, events
+from telethon.sessions import MemorySession
 from telethon.utils import get_peer_id
 
 from .config import load_settings
@@ -122,8 +123,15 @@ async def main() -> None:
     pm_alert_excluded_chat_ids: set[int] = set()
     need_bot_client = settings.pm_alerts_enabled or settings.forwarding_enabled
     if need_bot_client:
-        bot_client = TelegramClient(f"{settings.session_name}_bot_sender", settings.api_id, settings.api_hash)
+        # Keep bot auth stateless to prevent accidental reuse of a user-authorized sqlite session.
+        bot_client = TelegramClient(MemorySession(), settings.api_id, settings.api_hash)
         await bot_client.start(bot_token=settings.bot_token)
+        bot_identity = await bot_client.get_me()
+        if not bool(getattr(bot_identity, "bot", False)):
+            raise RuntimeError(
+                "BOT_TOKEN authentication did not produce a bot account. "
+                "Please check BOT_TOKEN and restart."
+            )
     if settings.forwarding_enabled:
         bot_target_entity = await bot_client.get_entity(settings.bot_target_chat)
     if settings.forwarding_enabled:
