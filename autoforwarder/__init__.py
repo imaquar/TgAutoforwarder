@@ -1,0 +1,1 @@
+"""TgAutoforwarder package."""
