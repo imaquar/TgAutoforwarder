@@ -1,6 +1,7 @@
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 from autoforwarder.stores import PmAlertCooldownStore
 from autoforwarder.telegram_ops import (
@@ -9,6 +10,7 @@ from autoforwarder.telegram_ops import (
     _format_pm_alert_email_item,
     _format_prefixed_html,
     _safe_media_filename,
+    _send_album_as_bot,
     _should_send_telegram_pm_alert,
 )
 
@@ -97,6 +99,42 @@ class TelegramOpsTests(unittest.IsolatedAsyncioTestCase):
                 last_my_message_ts=int(last_alert_ts) + 1,
             )
             self.assertTrue(allowed_after_reply)
+
+    async def test_send_album_as_bot_retries_without_caption_list(self) -> None:
+        message = types.SimpleNamespace(
+            file=types.SimpleNamespace(name="doc.txt", ext=".txt", mime_type="text/plain")
+        )
+        messages = [message, message, message]
+        downloaded_paths = ["/tmp/a.txt", "/tmp/b.txt", "/tmp/c.txt"]
+
+        class _FakeBotClient:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def send_file(self, entity, **kwargs):  # type: ignore[no-untyped-def]
+                self.calls.append(kwargs)
+                if isinstance(kwargs.get("caption"), list):
+                    raise RuntimeError("caption list failed")
+                return types.SimpleNamespace(id=1)
+
+        bot_client = _FakeBotClient()
+
+        with mock.patch(
+            "autoforwarder.telegram_ops._download_media_to_path",
+            side_effect=downloaded_paths,
+        ):
+            result = await _send_album_as_bot(
+                source_client=object(),  # type: ignore[arg-type]
+                bot_client=bot_client,  # type: ignore[arg-type]
+                bot_target_entity=object(),
+                messages=messages,  # type: ignore[arg-type]
+                captions=["<b>[Chat]</b>", "", ""],
+            )
+
+        self.assertEqual(getattr(result, "id", None), 1)
+        self.assertEqual(len(bot_client.calls), 2)
+        self.assertIsInstance(bot_client.calls[0].get("caption"), list)
+        self.assertEqual(bot_client.calls[1].get("caption"), "<b>[Chat]</b>")
 
 
 if __name__ == "__main__":

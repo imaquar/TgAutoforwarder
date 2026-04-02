@@ -339,7 +339,7 @@ async def _send_album_as_bot(
     bot_client: TelegramClient,
     bot_target_entity: Any,
     messages: list[types.Message],
-    captions: list[str],
+    captions: list[str] | None,
 ) -> Any:
     with tempfile.TemporaryDirectory(prefix="tgfwd_album_") as temp_dir:
         files: list[str] = []
@@ -349,13 +349,39 @@ async def _send_album_as_bot(
             downloaded = await _download_media_to_path(source_client, message, file_hint)
             files.append(downloaded)
 
-        return await bot_client.send_file(
-            bot_target_entity,
-            file=files,
-            caption=captions,
-            link_preview=False,
-            parse_mode="html",
-        )
+        # Some media sets fail with per-item caption lists (notably "files-only"
+        # albums). Retry with a single caption and then without captions to keep
+        # album grouping whenever possible.
+        send_attempts: list[str | list[str] | None] = []
+        if captions:
+            send_attempts.append(captions)
+            first_caption = captions[0].strip() if captions else ""
+            if first_caption:
+                send_attempts.append(first_caption)
+        send_attempts.append(None)
+
+        last_exc: Exception | None = None
+        for attempt_caption in send_attempts:
+            try:
+                if attempt_caption is None:
+                    return await bot_client.send_file(
+                        bot_target_entity,
+                        file=files,
+                        link_preview=False,
+                    )
+                return await bot_client.send_file(
+                    bot_target_entity,
+                    file=files,
+                    caption=attempt_caption,
+                    link_preview=False,
+                    parse_mode="html",
+                )
+            except Exception as exc:
+                last_exc = exc
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Failed to send album")
 
 
 async def _authorize_client(client: TelegramClient, settings: Settings) -> None:
