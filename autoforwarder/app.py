@@ -2,7 +2,6 @@ import argparse
 import asyncio
 from contextlib import suppress
 from datetime import datetime
-import html
 import logging
 import os
 import tempfile
@@ -38,6 +37,7 @@ from .telegram_ops import (
     _format_prefixed_html,
     _get_reply_quote_text,
     _list_dialogs,
+    _message_text_as_html,
     _pm_alerts_auto_delete_loop,
     _pm_alerts_deferred_unread_loop,
     _pm_alerts_sync_target_read_state_loop,
@@ -361,13 +361,15 @@ async def main() -> None:
             source = await event.get_chat()
             source_title = _entity_label(source)
             original_text = (message.message or "").strip()
+            original_text_html = _message_text_as_html(message)
             reply_quote_text = await _get_reply_quote_text(message)
             message_url = _build_message_url(source, message.id)
             formatted_text = _format_prefixed_html(
                 source_title,
-                original_text,
+                original_text_html,
                 message_url=message_url,
                 quote_text=reply_quote_text,
+                text_is_html=True,
             )
             formatted_prefix_only = _format_prefixed_html(source_title, "", message_url=message_url)
             plain_email_text = _format_email_forward_plain(
@@ -472,17 +474,19 @@ async def main() -> None:
             captions: list[str] = []
             for idx, message in enumerate(album_messages):
                 text = (message.message or "").strip()
+                text_html = _message_text_as_html(message)
                 if idx == 0:
                     captions.append(
                         _format_prefixed_html(
                             source_title,
-                            text,
+                            text_html,
                             message_url=first_message_url,
                             quote_text=first_reply_quote_text,
+                            text_is_html=True,
                         )
                     )
                 else:
-                    captions.append(html.escape(text) if text else "")
+                    captions.append(text_html if text else "")
 
             sent_target_ids: list[int] = []
             telegram_sent = False
@@ -737,13 +741,15 @@ async def main() -> None:
             source = await event.get_chat()
             source_title = _entity_label(source)
             original_text = (message.message or "").strip()
+            original_text_html = _message_text_as_html(message)
             reply_quote_text = await _get_reply_quote_text(message)
             message_url = _build_message_url(source, message.id)
             formatted_text = _format_prefixed_html(
                 source_title,
-                original_text,
+                original_text_html,
                 message_url=message_url,
                 quote_text=reply_quote_text,
+                text_is_html=True,
             )
 
             try:

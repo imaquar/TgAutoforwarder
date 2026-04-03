@@ -9,6 +9,7 @@ from autoforwarder.telegram_ops import (
     _format_email_forward_plain,
     _format_pm_alert_email_item,
     _format_prefixed_html,
+    _message_text_as_html,
     _safe_media_filename,
     _send_album_as_bot,
     _should_send_telegram_pm_alert,
@@ -28,6 +29,14 @@ class TelegramOpsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<blockquote>Quoted</blockquote>", rendered)
         self.assertTrue(rendered.endswith("Body text"))
 
+    def test_format_prefixed_html_keeps_html_links(self) -> None:
+        rendered = _format_prefixed_html(
+            "Work Chat",
+            'Check <a href="https://example.com">example</a>',
+            text_is_html=True,
+        )
+        self.assertIn('<a href="https://example.com">example</a>', rendered)
+
     def test_format_email_forward_plain_order(self) -> None:
         body = _format_email_forward_plain(
             "main",
@@ -35,6 +44,16 @@ class TelegramOpsTests(unittest.IsolatedAsyncioTestCase):
             message_url="https://t.me/c/1/2",
         )
         self.assertIn("> line1\n> line2\n\nmain\n\nhttps://t.me/c/1/2", body)
+
+    def test_message_text_as_html_prefers_text_html(self) -> None:
+        message = types.SimpleNamespace(
+            text_html='Visit <a href="https://example.com">link</a>',
+            message="Visit link",
+        )
+        self.assertEqual(
+            _message_text_as_html(message),  # type: ignore[arg-type]
+            'Visit <a href="https://example.com">link</a>',
+        )
 
     def test_pm_alert_text_languages(self) -> None:
         self.assertEqual(_build_pm_alert_text("Alice", "eng"), "Alice sent a new message")

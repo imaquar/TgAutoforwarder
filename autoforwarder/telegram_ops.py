@@ -164,6 +164,7 @@ def _format_prefixed_html(
     text: str,
     message_url: str | None = None,
     quote_text: str | None = None,
+    text_is_html: bool = False,
 ) -> str:
     escaped_prefix = html.escape(f"[{source_title}]")
     prefix_markup = f"<b>{escaped_prefix}</b>"
@@ -178,9 +179,25 @@ def _format_prefixed_html(
 
     stripped_text = text.strip()
     if stripped_text:
-        sections.append(html.escape(stripped_text))
+        if text_is_html:
+            sections.append(stripped_text)
+        else:
+            sections.append(html.escape(stripped_text))
 
     return "\n\n".join(sections)
+
+
+def _message_text_as_html(message: types.Message) -> str:
+    text_html = getattr(message, "text_html", None)
+    if isinstance(text_html, str):
+        stripped_html = text_html.strip()
+        if stripped_html:
+            return stripped_html
+
+    raw_text = (message.message or "").strip()
+    if raw_text:
+        return html.escape(raw_text)
+    return ""
 
 
 def _format_email_forward_plain(
