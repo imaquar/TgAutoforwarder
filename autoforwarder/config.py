@@ -20,7 +20,6 @@ class Settings:
     allowed_senders: list[str]
     chat_allowed_senders: dict[str, list[str]]
     message_map_file_bot: str
-    message_map_ttl_days: int
     pm_alerts_enabled: bool
     pm_alert_target_chat: str | int | None
     pm_alert_cooldown_minutes: int
@@ -324,11 +323,6 @@ def load_settings(require_routing: bool = True) -> Settings:
         allowed_senders=_parse_refs_csv(os.getenv("ALLOWED_SENDERS")),
         chat_allowed_senders=_parse_chat_allowed_senders(os.getenv("CHAT_ALLOWED_SENDERS")),
         message_map_file_bot=(os.getenv("MESSAGE_MAP_FILE_BOT") or "").strip() or default_message_map_file_bot,
-        message_map_ttl_days=_parse_non_negative_int(
-            os.getenv("MESSAGE_MAP_TTL_DAYS"),
-            default=7,
-            var_name="MESSAGE_MAP_TTL_DAYS",
-        ),
         pm_alerts_enabled=pm_alerts_enabled,
         pm_alert_target_chat=pm_alert_target_chat_ref,
         pm_alert_cooldown_minutes=_parse_non_negative_int(

@@ -68,12 +68,10 @@ BOT_TARGET_CHAT=
 
 ```env
 MESSAGE_MAP_FILE_BOT=autoforwarder_message_map_bot.json
-MESSAGE_MAP_TTL_DAYS=7
 ```
 
 - `MESSAGE_MAP_FILE_BOT`: where bot forwarding edit-sync mapping is stored.
-- `MESSAGE_MAP_TTL_DAYS`: auto-cleanup for old mapping records.
-- Example: `7` means delete records older than 7 days, `0` disables cleanup.
+- Mapping cleanup is fixed: records older than 7 days are deleted automatically.
 
 ## 7. Optional sender filters
 
@@ -222,5 +220,5 @@ python forwarder.py --list-chats --list-limit 500
 ## 12. Notes
 
 - Edit sync works for messages that were forwarded while map file was maintained.
-- `MESSAGE_MAP_TTL_DAYS=0` disables cleanup.
+- Message map cleanup is always enabled with a 7-day retention window.
 - Some media types may not support caption edits on Telegram side.

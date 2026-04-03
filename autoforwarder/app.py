@@ -136,10 +136,7 @@ async def main() -> None:
         bot_target_entity = await bot_client.get_entity(settings.bot_target_chat)
     if settings.forwarding_enabled:
         active_message_map_file = settings.message_map_file_bot
-        message_map_store = MessageMapStore(
-            active_message_map_file,
-            ttl_days=settings.message_map_ttl_days,
-        )
+        message_map_store = MessageMapStore(active_message_map_file)
     if pm_alerts_active:
         if settings.pm_alerts_enabled:
             pm_alert_target_entity = await bot_client.get_entity(settings.pm_alert_target_chat)
