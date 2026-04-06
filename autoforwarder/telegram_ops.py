@@ -636,6 +636,22 @@ async def _pm_alerts_sync_target_read_state_loop(
     read_sync_store: PmAlertReadSyncStore,
     check_seconds: int,
 ) -> None:
+    async def _resolve_input_peer_from_peer_id(peer_id: int) -> Any | None:
+        try:
+            return await client.get_input_entity(peer_id)
+        except (ValueError, errors.PeerIdInvalidError):
+            pass
+
+        try:
+            async for dialog in client.iter_dialogs():
+                if get_peer_id(dialog.entity) == peer_id:
+                    return await client.get_input_entity(dialog.entity)
+        except Exception as exc:
+            logging.exception("Failed to resolve peer %s via dialogs fallback: %s", peer_id, exc)
+            return None
+
+        return None
+
     logging.info(
         "PM alerts target read-state sync enabled: check every %ss",
         check_seconds,
@@ -655,21 +671,23 @@ async def _pm_alerts_sync_target_read_state_loop(
                     resolved_ids.append(alert_message_id)
                     continue
                 try:
-                    source_input_peer = await client.get_input_entity(source_peer_id)
-                    peer_dialogs = await client(
-                        functions.messages.GetPeerDialogsRequest(peers=[source_input_peer])
-                    )
-                    source_dialog = peer_dialogs.dialogs[0] if peer_dialogs.dialogs else None
-                    if source_dialog is None:
+                    source_input_peer = await _resolve_input_peer_from_peer_id(source_peer_id)
+                    if source_input_peer is None:
                         continue
-                    read_inbox_max_id = int(getattr(source_dialog, "read_inbox_max_id", 0) or 0)
-                    if source_message_id <= read_inbox_max_id:
+
+                    source_message = await client.get_messages(source_input_peer, ids=source_message_id)
+                    if isinstance(source_message, list):
+                        source_message = source_message[0] if source_message else None
+
+                    if source_message is None:
+                        # Source message no longer exists; do not block target-chat read sync forever.
                         resolved_ids.append(alert_message_id)
                         continue
-                except (ValueError, errors.PeerIdInvalidError):
-                    # Entity may be temporarily unavailable in cache after restart.
-                    # Keep the record and retry on the next loop to avoid false "read" marks.
-                    continue
+
+                    source_unread = bool(getattr(source_message, "unread", False))
+                    if not source_unread:
+                        resolved_ids.append(alert_message_id)
+                        continue
                 except Exception as exc:
                     logging.exception(
                         "Failed to check source PM read state for %s/%s: %s",
