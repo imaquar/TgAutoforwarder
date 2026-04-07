@@ -675,17 +675,29 @@ async def _pm_alerts_sync_target_read_state_loop(
                     if source_input_peer is None:
                         continue
 
+                    peer_dialogs = await client(
+                        functions.messages.GetPeerDialogsRequest(peers=[source_input_peer])
+                    )
+                    source_dialog = peer_dialogs.dialogs[0] if peer_dialogs.dialogs else None
+                    if source_dialog is None:
+                        # No reliable read-state yet, retry later.
+                        continue
+                    read_inbox_max_id = int(getattr(source_dialog, "read_inbox_max_id", 0) or 0)
+
                     source_message = await client.get_messages(source_input_peer, ids=source_message_id)
                     if isinstance(source_message, list):
                         source_message = source_message[0] if source_message else None
 
                     if source_message is None:
-                        # Source message no longer exists; do not block target-chat read sync forever.
-                        resolved_ids.append(alert_message_id)
+                        # Source message no longer exists in history.
+                        # Only resolve if dialog read position already moved past this message id.
+                        if source_message_id <= read_inbox_max_id:
+                            resolved_ids.append(alert_message_id)
                         continue
 
-                    source_unread = bool(getattr(source_message, "unread", False))
-                    if not source_unread:
+                    # Be conservative: message is "read" only when dialog read marker confirms it.
+                    # This avoids false positives where `message.unread` may be absent or stale.
+                    if source_message_id <= read_inbox_max_id:
                         resolved_ids.append(alert_message_id)
                         continue
                 except Exception as exc:
