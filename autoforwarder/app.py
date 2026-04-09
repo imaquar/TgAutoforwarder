@@ -51,6 +51,7 @@ from .telegram_ops import (
     _should_send_telegram_pm_alert,
 )
 
+PM_ALERTS_READ_SYNC_CHECK_SECONDS = 5
 
 
 def _parse_args() -> argparse.Namespace:
@@ -196,7 +197,7 @@ async def main() -> None:
                     pm_alert_target_entity_user=pm_alert_target_entity_user,
                     pm_alert_target_peer_id=pm_alert_target_peer_id,
                     read_sync_store=pm_alert_read_sync_store,
-                    check_seconds=settings.pm_alert_sync_target_read_state_check_seconds,
+                    check_seconds=PM_ALERTS_READ_SYNC_CHECK_SECONDS,
                 )
             )
     if settings.email_pm_alerts_batch_enabled and email_sender is not None:
@@ -319,7 +320,7 @@ async def main() -> None:
         if settings.pm_alert_sync_target_read_state_enabled:
             logging.info(
                 "PM alerts target read-state sync enabled: check every %ss, file=%s",
-                settings.pm_alert_sync_target_read_state_check_seconds,
+                PM_ALERTS_READ_SYNC_CHECK_SECONDS,
                 settings.pm_alert_sync_target_read_state_file,
             )
 

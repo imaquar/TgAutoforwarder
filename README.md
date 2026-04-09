@@ -109,7 +109,6 @@ PM_ALERT_DEFERRED_UNREAD_ENABLED=false
 PM_ALERT_DEFERRED_UNREAD_MINUTES=10
 PM_ALERT_DEFERRED_UNREAD_FILE=autoforwarder_pm_alerts_deferred_unread.json
 PM_ALERTS_SYNC_TARGET_READ_STATE_ENABLED=false
-PM_ALERTS_SYNC_TARGET_READ_STATE_CHECK_SECONDS=10
 PM_ALERTS_SYNC_TARGET_READ_STATE_FILE=autoforwarder_pm_alerts_read_sync.json
 # optional ignore list
 PM_ALERTS_EXCLUDE_CHATS=@john,123456789
@@ -137,7 +136,7 @@ PM_ALERTS_EXCLUDE_CHATS=@john,123456789
 - `PM_ALERT_DEFERRED_UNREAD_FILE`: deferred unread queue storage.
 - Deferred queue keeps one active record per sender to avoid duplicate alerts for the same pending thread.
 - `PM_ALERTS_SYNC_TARGET_READ_STATE_ENABLED`: track Telegram PM alerts in target chat and mark target chat as read when related source PMs are read.
-- `PM_ALERTS_SYNC_TARGET_READ_STATE_CHECK_SECONDS`: polling interval for read-state sync.
+- Read-state sync polling interval is fixed at 5 seconds.
 - `PM_ALERTS_SYNC_TARGET_READ_STATE_FILE`: storage for tracked PM alert ids used by read-state sync.
 - `PM_ALERTS_EXCLUDE_CHATS`: users/chats to ignore for PM alerts.
 

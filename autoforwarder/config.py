@@ -36,7 +36,6 @@ class Settings:
     pm_alerts_auto_delete_file: str
     pm_alert_sync_target_read_state_enabled: bool
     pm_alert_sync_target_read_state_file: str
-    pm_alert_sync_target_read_state_check_seconds: int
     pm_alert_deferred_unread_enabled: bool
     pm_alert_deferred_unread_minutes: int
     pm_alert_deferred_unread_file: str
@@ -221,11 +220,6 @@ def load_settings(require_routing: bool = True) -> Settings:
         default=10,
         var_name="PM_ALERT_DEFERRED_UNREAD_MINUTES",
     )
-    pm_alert_sync_target_read_state_check_seconds = _parse_non_negative_int(
-        os.getenv("PM_ALERTS_SYNC_TARGET_READ_STATE_CHECK_SECONDS"),
-        default=10,
-        var_name="PM_ALERTS_SYNC_TARGET_READ_STATE_CHECK_SECONDS",
-    )
     email_pm_alerts_batch_minutes = _parse_non_negative_int(
         os.getenv("EMAIL_PM_ALERTS_BATCH_MINUTES"),
         default=10,
@@ -270,15 +264,6 @@ def load_settings(require_routing: bool = True) -> Settings:
         raise ValueError("PM_ALERTS_AUTO_DELETE_AFTER_HOURS must be at least 1 when PM alerts auto-delete is enabled")
     if pm_alert_deferred_unread_enabled and pm_alert_deferred_unread_minutes < 1:
         raise ValueError("PM_ALERT_DEFERRED_UNREAD_MINUTES must be at least 1 when deferred unread alerts are enabled")
-    if (
-        pm_alert_sync_target_read_state_enabled
-        and pm_alert_sync_target_read_state_check_seconds < 1
-    ):
-        raise ValueError(
-            "PM_ALERTS_SYNC_TARGET_READ_STATE_CHECK_SECONDS must be at least 1 "
-            "when target read-state sync is enabled"
-        )
-
     if forwarding_enabled or pm_alerts_enabled:
         if not bot_token:
             raise ValueError(
@@ -346,7 +331,6 @@ def load_settings(require_routing: bool = True) -> Settings:
             "PM_ALERTS_SYNC_TARGET_READ_STATE_FILE",
             f"{session_name}_pm_alerts_read_sync.json",
         ),
-        pm_alert_sync_target_read_state_check_seconds=pm_alert_sync_target_read_state_check_seconds,
         pm_alert_deferred_unread_enabled=pm_alert_deferred_unread_enabled,
         pm_alert_deferred_unread_minutes=pm_alert_deferred_unread_minutes,
         pm_alert_deferred_unread_file=os.getenv(
