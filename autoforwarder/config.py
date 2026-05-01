@@ -12,12 +12,14 @@ class Settings:
     session_name: str
     forwarding_enabled: bool
     source_chats: list[str]
+    source_chats_2: list[str]
     target_chat: str | int | None
+    target_chat_2: str | int | None
     bot_token: str | None
     bot_target_chat: str | int | None
+    bot_target_chat_2: str | int | None
     auth_mode: str
     skip_outgoing: bool
-    allowed_senders: list[str]
     chat_allowed_senders: dict[str, list[str]]
     message_map_file_bot: str
     pm_alerts_enabled: bool
@@ -166,10 +168,13 @@ def load_settings(require_routing: bool = True) -> Settings:
     api_id_raw = os.getenv("API_ID")
     api_hash = os.getenv("API_HASH")
     source_chats_raw = os.getenv("SOURCE_CHATS", "")
+    source_chats_2_raw = os.getenv("SOURCE_CHATS_2", "")
     target_chat = os.getenv("TARGET_CHAT", "")
+    target_chat_2 = os.getenv("TARGET_CHAT_2", "")
     forwarding_enabled = _parse_bool(os.getenv("FORWARDING_ENABLED"), default=True)
     bot_token = (os.getenv("BOT_TOKEN") or "").strip() or None
     bot_target_chat_raw = (os.getenv("BOT_TARGET_CHAT") or "").strip()
+    bot_target_chat_2_raw = (os.getenv("BOT_TARGET_CHAT_2") or "").strip()
     pm_alerts_enabled = _parse_bool(os.getenv("PM_ALERTS_ENABLED"), default=False)
     pm_alert_target_chat_raw = (os.getenv("PM_ALERT_TARGET_CHAT") or "").strip()
     pm_alert_require_my_silence = _parse_bool(os.getenv("PM_ALERT_REQUIRE_MY_SILENCE"), default=False)
@@ -232,17 +237,22 @@ def load_settings(require_routing: bool = True) -> Settings:
     )
 
     source_chats: list[str] = [item.strip() for item in source_chats_raw.split(",") if item.strip()]
+    source_chats_2: list[str] = [item.strip() for item in source_chats_2_raw.split(",") if item.strip()]
     target_chat_ref: str | int | None = _coerce_ref(target_chat.strip()) if target_chat.strip() else None
+    target_chat_2_ref: str | int | None = _coerce_ref(target_chat_2.strip()) if target_chat_2.strip() else None
     bot_target_chat_ref: str | int | None = _coerce_ref(bot_target_chat_raw) if bot_target_chat_raw else None
+    bot_target_chat_2_ref: str | int | None = _coerce_ref(bot_target_chat_2_raw) if bot_target_chat_2_raw else None
     pm_alert_target_chat_ref: str | int | None = None
     source_delivery_enabled = forwarding_enabled or email_forwarding_enabled
     pm_alerts_active = pm_alerts_enabled or email_pm_alerts_batch_enabled
     if require_routing and source_delivery_enabled:
-        if not source_chats:
-            raise ValueError("Environment variable SOURCE_CHATS is required")
+        if not source_chats and not source_chats_2:
+            raise ValueError("At least one source route is required: SOURCE_CHATS or SOURCE_CHATS_2")
     if require_routing and forwarding_enabled:
-        if target_chat_ref is None:
-            raise ValueError("Environment variable TARGET_CHAT is required")
+        if source_chats and target_chat_ref is None:
+            raise ValueError("Environment variable TARGET_CHAT is required when SOURCE_CHATS is set")
+        if source_chats_2 and target_chat_2_ref is None:
+            raise ValueError("Environment variable TARGET_CHAT_2 is required when SOURCE_CHATS_2 is set")
 
     if require_routing and not source_delivery_enabled and not pm_alerts_active:
         raise ValueError("Nothing to run: enable forwarding, PM alerts, or email delivery")
@@ -286,10 +296,18 @@ def load_settings(require_routing: bool = True) -> Settings:
             raise ValueError("EMAIL_SMTP_PASSWORD is required when EMAIL_SMTP_USERNAME is set")
 
     if forwarding_enabled:
-        bot_target_chat_ref = bot_target_chat_ref or target_chat_ref
+        if source_chats:
+            bot_target_chat_ref = bot_target_chat_ref or target_chat_ref
+        if source_chats_2:
+            bot_target_chat_2_ref = bot_target_chat_2_ref or target_chat_2_ref
 
     if pm_alerts_enabled:
-        default_pm_alert_target = bot_target_chat_ref or target_chat_ref
+        default_pm_alert_target = (
+            bot_target_chat_ref
+            or target_chat_ref
+            or bot_target_chat_2_ref
+            or target_chat_2_ref
+        )
         pm_alert_target_chat_ref = _coerce_ref(pm_alert_target_chat_raw) if pm_alert_target_chat_raw else default_pm_alert_target
         if pm_alert_target_chat_ref is None:
             raise ValueError("Could not resolve PM alerts target chat. Set PM_ALERT_TARGET_CHAT explicitly.")
@@ -300,12 +318,14 @@ def load_settings(require_routing: bool = True) -> Settings:
         session_name=session_name,
         forwarding_enabled=forwarding_enabled,
         source_chats=source_chats,
+        source_chats_2=source_chats_2,
         target_chat=target_chat_ref,
+        target_chat_2=target_chat_2_ref,
         bot_token=bot_token,
         bot_target_chat=bot_target_chat_ref,
+        bot_target_chat_2=bot_target_chat_2_ref,
         auth_mode=_parse_auth_mode(os.getenv("AUTH_MODE")),
         skip_outgoing=_parse_bool(os.getenv("SKIP_OUTGOING"), default=True),
-        allowed_senders=_parse_refs_csv(os.getenv("ALLOWED_SENDERS")),
         chat_allowed_senders=_parse_chat_allowed_senders(os.getenv("CHAT_ALLOWED_SENDERS")),
         message_map_file_bot=(os.getenv("MESSAGE_MAP_FILE_BOT") or "").strip() or default_message_map_file_bot,
         pm_alerts_enabled=pm_alerts_enabled,

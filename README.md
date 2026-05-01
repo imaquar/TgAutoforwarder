@@ -3,8 +3,9 @@
 Telegram autoforwarder on Python + Telethon.
 
 ## Features
-- Listens for new messages in `SOURCE_CHATS`.
-- Sends them to `TARGET_CHAT` via bot delivery.
+- Listens for new messages in source routes (`SOURCE_CHATS`, optional `SOURCE_CHATS_2`).
+- Sends them to their target chats via bot delivery.
+- Supports a second independent forwarding route: `SOURCE_CHATS_2` -> `TARGET_CHAT_2`.
 - Adds a `[Source Chat Name]` prefix to message text/caption.
 - For reply messages, includes quoted original message under the `[Source Chat Name]` prefix.
 - Preserves grouped media (albums) as grouped messages in target chat.
@@ -44,14 +45,18 @@ AUTH_MODE=phone
 ```env
 SOURCE_CHATS=@chat_one,@chat_two
 TARGET_CHAT=@my_target_chat
+SOURCE_CHATS_2=
+TARGET_CHAT_2=
 FORWARDING_ENABLED=true
 SKIP_OUTGOING=true
 ```
 
-- `SOURCE_CHATS` and `TARGET_CHAT` support `@username`, links, and numeric IDs.
-- `FORWARDING_ENABLED=false` disables forwarding from `SOURCE_CHATS` completely.
+- `SOURCE_CHATS`, `TARGET_CHAT`, `SOURCE_CHATS_2`, and `TARGET_CHAT_2` support `@username`, links, and numeric IDs.
+- Route 2 is optional: leave `SOURCE_CHATS_2` empty if you do not need it.
+- If `SOURCE_CHATS_2` is set, `TARGET_CHAT_2` is required.
+- `FORWARDING_ENABLED=false` disables forwarding from both source-route sets completely.
 - If `FORWARDING_ENABLED=false`, keep at least one other delivery channel enabled (`EMAIL_FORWARDING_ENABLED`, `PM_ALERTS_ENABLED`, or `EMAIL_PM_ALERTS_BATCH_ENABLED`).
-- `SKIP_OUTGOING=true` means your own outgoing messages from `SOURCE_CHATS` will be ignored.  
+- `SKIP_OUTGOING=true` means your own outgoing messages from source routes will be ignored.  
 - Set `SKIP_OUTGOING=false` if you want to forward your own messages too.
 
 ## 5. Bot delivery
@@ -60,6 +65,8 @@ SKIP_OUTGOING=true
 BOT_TOKEN=123456:your_bot_token
 # optional, if empty TARGET_CHAT is used
 BOT_TARGET_CHAT=
+# optional, if empty TARGET_CHAT_2 is used
+BOT_TARGET_CHAT_2=
 ```
 
 `BOT_TOKEN` is required when `FORWARDING_ENABLED=true` (and for Telegram PM alerts when `PM_ALERTS_ENABLED=true`).
@@ -75,13 +82,7 @@ MESSAGE_MAP_FILE_BOT=autoforwarder_message_map_bot.json
 
 ## 7. Optional sender filters
 
-Forward only specific senders from all source chats:
-
-```env
-ALLOWED_SENDERS=@boss,123456789
-```
-
-Per-chat filters (priority over `ALLOWED_SENDERS`):
+Per-chat sender filters:
 
 ```env
 CHAT_ALLOWED_SENDERS={"@work_chat":["@boss","123456789"],"-1001234567890":["@teamlead","777000"]}
@@ -115,7 +116,7 @@ PM_ALERTS_EXCLUDE_CHATS=@john,123456789
 ```
 
 - `PM_ALERTS_ENABLED`: turns private-message alerts on/off.
-- `PM_ALERT_TARGET_CHAT`: where Telegram PM alerts are sent. If empty, fallback is `BOT_TARGET_CHAT` then `TARGET_CHAT`.
+- `PM_ALERT_TARGET_CHAT`: where Telegram PM alerts are sent. If empty, fallback is `BOT_TARGET_CHAT`, then `TARGET_CHAT`, then route-2 target.
 - `PM_ALERT_COOLDOWN_MINUTES`: minimum interval between Telegram PM alerts from the same sender.
 - When `PM_ALERT_REQUIRE_MY_SILENCE=true`, your new outgoing message starts a new dialog cycle:
   old sender cooldown from before your reply no longer blocks the next alert after silence window.
@@ -160,7 +161,7 @@ EMAIL_PM_ALERTS_BATCH_ENABLED=true
 ## 9. Optional email delivery
 
 ```env
-# email copy of SOURCE_CHATS forwarding
+# email copy of SOURCE_CHATS/SOURCE_CHATS_2 forwarding
 EMAIL_FORWARDING_ENABLED=false
 
 # debounced email PM alerts batch

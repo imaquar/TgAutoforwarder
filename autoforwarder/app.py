@@ -41,7 +41,6 @@ from .telegram_ops import (
     _pm_alerts_auto_delete_loop,
     _pm_alerts_deferred_unread_loop,
     _pm_alerts_sync_target_read_state_loop,
-    _resolve_allowed_sender_ids,
     _resolve_chat_sender_filters,
     _resolve_entities,
     _safe_media_filename,
@@ -100,12 +99,18 @@ async def main() -> None:
         )
 
     source_entities: list[Any] = []
+    source_entities_2: list[Any] = []
     source_delivery_enabled = settings.forwarding_enabled or settings.email_forwarding_enabled
     if source_delivery_enabled:
-        source_entities = await _resolve_entities(client, settings.source_chats)
+        if settings.source_chats:
+            source_entities = await _resolve_entities(client, settings.source_chats)
+        if settings.source_chats_2:
+            source_entities_2 = await _resolve_entities(client, settings.source_chats_2)
 
     bot_client: TelegramClient | None = None
     bot_target_entity: Any | None = None
+    bot_target_entity_2: Any | None = None
+    route_target_by_source_chat_id: dict[int, Any] = {}
     message_map_store: MessageMapStore | None = None
     active_message_map_file: str | None = None
     pm_alert_target_entity: Any | None = None
@@ -133,8 +138,10 @@ async def main() -> None:
                 "BOT_TOKEN authentication did not produce a bot account. "
                 "Please check BOT_TOKEN and restart."
             )
-    if settings.forwarding_enabled:
+    if settings.forwarding_enabled and source_entities:
         bot_target_entity = await bot_client.get_entity(settings.bot_target_chat)
+    if settings.forwarding_enabled and source_entities_2:
+        bot_target_entity_2 = await bot_client.get_entity(settings.bot_target_chat_2)
     if settings.forwarding_enabled:
         active_message_map_file = settings.message_map_file_bot
         message_map_store = MessageMapStore(active_message_map_file)
@@ -209,32 +216,58 @@ async def main() -> None:
             )
         )
 
-    source_peer_ids: set[int] = set()
-    target_peer_id: int | None = None
-    if source_delivery_enabled:
-        source_peer_ids = {get_peer_id(entity) for entity in source_entities}
-    if settings.forwarding_enabled:
-        try:
-            target_peer_id = get_peer_id(await client.get_entity(settings.bot_target_chat))
-        except Exception:
-            logging.warning("Could not resolve bot delivery target in user account. Target loop protection may be limited.")
-
-    global_allowed_sender_ids: set[int] = set()
+    all_source_entities = source_entities + source_entities_2
+    source_peer_ids: set[int] = {get_peer_id(entity) for entity in all_source_entities}
+    target_peer_ids: set[int] = set()
     chat_allowed_sender_ids: dict[int, set[int]] = {}
-    if settings.forwarding_enabled:
-        global_allowed_sender_ids = await _resolve_allowed_sender_ids(client, settings.allowed_senders)
-        chat_allowed_sender_ids = await _resolve_chat_sender_filters(client, settings.chat_allowed_senders)
 
-        if target_peer_id is not None and target_peer_id in source_peer_ids:
-            logging.warning("Target chat is also in SOURCE_CHATS. Messages from it will be ignored to avoid loops.")
+    if source_delivery_enabled:
+        chat_allowed_sender_ids = await _resolve_chat_sender_filters(client, settings.chat_allowed_senders)
         for chat_peer_id in chat_allowed_sender_ids:
             if chat_peer_id not in source_peer_ids:
                 logging.warning(
-                    "CHAT_ALLOWED_SENDERS contains chat %s that is not in SOURCE_CHATS. This filter will not be used.",
+                    "CHAT_ALLOWED_SENDERS contains chat %s that is not in SOURCE_CHATS/SOURCE_CHATS_2. This filter will not be used.",
                     chat_peer_id,
                 )
-    elif settings.allowed_senders or settings.chat_allowed_senders:
-        logging.warning("Sender filters are configured but FORWARDING_ENABLED=false. They will be ignored.")
+    elif settings.chat_allowed_senders:
+        logging.warning("Sender filters are configured but source forwarding is disabled. They will be ignored.")
+
+    if settings.forwarding_enabled:
+        route_specs = [
+            (1, source_entities, bot_target_entity, settings.bot_target_chat),
+            (2, source_entities_2, bot_target_entity_2, settings.bot_target_chat_2),
+        ]
+        for route_no, route_sources, route_target_entity, route_target_ref in route_specs:
+            if not route_sources:
+                continue
+            if route_target_entity is None:
+                raise ValueError(f"Could not resolve bot target entity for route {route_no}")
+
+            for source_entity in route_sources:
+                source_peer_id = get_peer_id(source_entity)
+                if source_peer_id in route_target_by_source_chat_id:
+                    raise ValueError(
+                        "Source chat overlap between SOURCE_CHATS and SOURCE_CHATS_2 is not supported. "
+                        "Use each source chat in only one route."
+                    )
+                route_target_by_source_chat_id[source_peer_id] = route_target_entity
+
+            try:
+                if route_target_ref is not None:
+                    target_peer_ids.add(get_peer_id(await client.get_entity(route_target_ref)))
+            except Exception:
+                logging.warning(
+                    "Could not resolve bot delivery target for route %s in user account. "
+                    "Target loop protection may be limited.",
+                    route_no,
+                )
+
+        for target_peer_id in target_peer_ids:
+            if target_peer_id in source_peer_ids:
+                logging.warning(
+                    "A target chat is also present in SOURCE_CHATS/SOURCE_CHATS_2. "
+                    "Messages from target chats will be ignored to avoid loops."
+                )
 
     me = await client.get_me()
     logging.info("Connected as %s", me.username or me.id)
@@ -242,30 +275,25 @@ async def main() -> None:
         bot_me = await bot_client.get_me()
         logging.info("Delivery mode: bot")
         logging.info("Bot sender: %s", bot_me.username or bot_me.id)
-        logging.info("Target chat (bot): %s", _entity_label(bot_target_entity))
         logging.info("Message map file: %s", active_message_map_file)
-        logging.info("Source chats: %s", ", ".join(_entity_label(entity) for entity in source_entities))
-        if global_allowed_sender_ids:
-            logging.info("Global sender filter enabled: %s sender(s)", len(global_allowed_sender_ids))
+        if source_entities:
+            logging.info("Route 1 target chat (bot): %s", _entity_label(bot_target_entity))
+            logging.info("Route 1 source chats: %s", ", ".join(_entity_label(entity) for entity in source_entities))
+        if source_entities_2:
+            logging.info("Route 2 target chat (bot): %s", _entity_label(bot_target_entity_2))
+            logging.info("Route 2 source chats: %s", ", ".join(_entity_label(entity) for entity in source_entities_2))
         if chat_allowed_sender_ids:
             logging.info("Per-chat sender filter enabled for %s chat(s)", len(chat_allowed_sender_ids))
     elif settings.email_forwarding_enabled:
-        logging.info("Telegram forwarding to TARGET_CHAT is disabled (FORWARDING_ENABLED=false). Email forwarding is enabled.")
-        global_allowed_sender_ids = await _resolve_allowed_sender_ids(client, settings.allowed_senders)
-        chat_allowed_sender_ids = await _resolve_chat_sender_filters(client, settings.chat_allowed_senders)
-        for chat_peer_id in chat_allowed_sender_ids:
-            if chat_peer_id not in source_peer_ids:
-                logging.warning(
-                    "CHAT_ALLOWED_SENDERS contains chat %s that is not in SOURCE_CHATS. This filter will not be used.",
-                    chat_peer_id,
-                )
-        if global_allowed_sender_ids:
-            logging.info("Global sender filter enabled: %s sender(s)", len(global_allowed_sender_ids))
+        logging.info(
+            "Telegram forwarding to target chats is disabled (FORWARDING_ENABLED=false). "
+            "Email forwarding is enabled."
+        )
         if chat_allowed_sender_ids:
             logging.info("Per-chat sender filter enabled for %s chat(s)", len(chat_allowed_sender_ids))
-        logging.info("Source chats (email): %s", ", ".join(_entity_label(entity) for entity in source_entities))
+        logging.info("Source chats (email): %s", ", ".join(_entity_label(entity) for entity in all_source_entities))
     else:
-        logging.info("Forwarding from SOURCE_CHATS is disabled (FORWARDING_ENABLED=false).")
+        logging.info("Forwarding from SOURCE_CHATS/SOURCE_CHATS_2 is disabled (FORWARDING_ENABLED=false).")
     if settings.email_forwarding_enabled:
         logging.info("Email forwarding enabled: to=%s", ", ".join(settings.email_to))
     if settings.email_pm_alerts_batch_enabled:
@@ -325,6 +353,11 @@ async def main() -> None:
             )
 
     if source_delivery_enabled:
+        def _forward_target_entity_for_chat(chat_id: int | None) -> Any | None:
+            if chat_id is None:
+                return None
+            return route_target_by_source_chat_id.get(chat_id)
+
         def _passes_forward_filters(chat_id: int | None, sender_id: int | None, is_out: bool) -> bool:
             if chat_id is None:
                 return False
@@ -332,19 +365,16 @@ async def main() -> None:
             if settings.skip_outgoing and is_out:
                 return False
 
-            if target_peer_id is not None and chat_id == target_peer_id:
+            if chat_id in target_peer_ids:
                 return False
 
             allowed_for_chat = chat_allowed_sender_ids.get(chat_id)
             if allowed_for_chat is not None:
                 return sender_id is not None and sender_id in allowed_for_chat
 
-            if global_allowed_sender_ids:
-                return sender_id is not None and sender_id in global_allowed_sender_ids
-
             return True
 
-        @client.on(events.NewMessage(chats=source_entities))
+        @client.on(events.NewMessage(chats=all_source_entities))
         async def forward_message(event: events.NewMessage.Event) -> None:
             if not _passes_forward_filters(event.chat_id, event.sender_id, event.out):
                 return
@@ -375,11 +405,15 @@ async def main() -> None:
                 quote_text=reply_quote_text,
                 message_url=message_url,
             )
+            forward_target_entity = _forward_target_entity_for_chat(event.chat_id)
             sent_target_message_id: int | None = None
             telegram_sent = False
             email_sent = False
 
-            if settings.forwarding_enabled:
+            if settings.forwarding_enabled and forward_target_entity is None:
+                logging.warning("No forwarding route configured for chat %s", event.chat_id)
+
+            if settings.forwarding_enabled and forward_target_entity is not None:
                 try:
                     if message.media:
                         caption = formatted_text
@@ -387,14 +421,14 @@ async def main() -> None:
                             send_result = await _send_media_as_bot(
                                 source_client=client,
                                 bot_client=bot_client,
-                                bot_target_entity=bot_target_entity,
+                                bot_target_entity=forward_target_entity,
                                 message=message,
                                 caption=caption,
                             )
                             sent_target_message_id = _extract_message_id(send_result)
                         except Exception:
                             sent_msg = await bot_client.send_message(
-                                bot_target_entity,
+                                forward_target_entity,
                                 formatted_text,
                                 link_preview=False,
                                 parse_mode="html",
@@ -406,7 +440,7 @@ async def main() -> None:
                             pass
                         else:
                             sent_msg = await bot_client.send_message(
-                                bot_target_entity,
+                                forward_target_entity,
                                 formatted_text,
                                 link_preview=False,
                                 parse_mode="html",
@@ -451,7 +485,7 @@ async def main() -> None:
                     " [email]" if email_sent else "",
                 )
 
-        @client.on(events.Album(chats=source_entities))
+        @client.on(events.Album(chats=all_source_entities))
         async def forward_album(event: events.Album.Event) -> None:
             if not _passes_forward_filters(event.chat_id, event.sender_id, event.out):
                 return
@@ -468,6 +502,7 @@ async def main() -> None:
             source_title = _entity_label(source)
             first_message_url = _build_message_url(source, album_messages[0].id)
             first_reply_quote_text = await _get_reply_quote_text(album_messages[0])
+            forward_target_entity = _forward_target_entity_for_chat(event.chat_id)
 
             captions: list[str] = []
             for idx, message in enumerate(album_messages):
@@ -489,13 +524,16 @@ async def main() -> None:
             sent_target_ids: list[int] = []
             telegram_sent = False
             email_sent = False
-            if settings.forwarding_enabled:
+            if settings.forwarding_enabled and forward_target_entity is None:
+                logging.warning("No forwarding route configured for album chat %s", event.chat_id)
+
+            if settings.forwarding_enabled and forward_target_entity is not None:
                 try:
                     try:
                         send_result = await _send_album_as_bot(
                             source_client=client,
                             bot_client=bot_client,
-                            bot_target_entity=bot_target_entity,
+                            bot_target_entity=forward_target_entity,
                             messages=album_messages,
                             captions=captions,
                         )
@@ -510,7 +548,7 @@ async def main() -> None:
                                 send_result = await _send_media_as_bot(
                                     source_client=client,
                                     bot_client=bot_client,
-                                    bot_target_entity=bot_target_entity,
+                                    bot_target_entity=forward_target_entity,
                                     message=message,
                                     caption=captions[idx],
                                 )
@@ -720,7 +758,7 @@ async def main() -> None:
             )
 
     if settings.forwarding_enabled:
-        @client.on(events.MessageEdited(chats=source_entities))
+        @client.on(events.MessageEdited(chats=all_source_entities))
         async def edit_forwarded_message(event: events.MessageEdited.Event) -> None:
             if message_map_store is None:
                 return
@@ -734,6 +772,10 @@ async def main() -> None:
 
             mapped_target_message_id = await message_map_store.get(event.chat_id, message.id)
             if mapped_target_message_id is None:
+                return
+            forward_target_entity = _forward_target_entity_for_chat(event.chat_id)
+            if forward_target_entity is None:
+                logging.warning("No forwarding route configured for edited message chat %s", event.chat_id)
                 return
 
             source = await event.get_chat()
@@ -752,7 +794,7 @@ async def main() -> None:
 
             try:
                 await bot_client.edit_message(
-                    bot_target_entity,
+                    forward_target_entity,
                     mapped_target_message_id,
                     formatted_text,
                     link_preview=False,

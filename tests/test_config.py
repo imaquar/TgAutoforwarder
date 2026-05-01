@@ -60,6 +60,29 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Nothing to run"):
             load_settings(require_routing=True)
 
+    def test_load_settings_second_route_defaults(self) -> None:
+        self._set_base_env()
+        os.environ["FORWARDING_ENABLED"] = "true"
+        os.environ["SOURCE_CHATS_2"] = "-100333"
+        os.environ["TARGET_CHAT_2"] = "-100444"
+        os.environ["BOT_TOKEN"] = "123:token"
+
+        settings = load_settings(require_routing=True)
+
+        self.assertEqual(settings.source_chats, [])
+        self.assertEqual(settings.source_chats_2, ["-100333"])
+        self.assertEqual(settings.target_chat_2, -100444)
+        self.assertEqual(settings.bot_target_chat_2, -100444)
+
+    def test_load_settings_requires_target_chat_2_when_source_chats_2_set(self) -> None:
+        self._set_base_env()
+        os.environ["FORWARDING_ENABLED"] = "true"
+        os.environ["SOURCE_CHATS_2"] = "-100333"
+        os.environ["BOT_TOKEN"] = "123:token"
+
+        with self.assertRaisesRegex(ValueError, "TARGET_CHAT_2"):
+            load_settings(require_routing=True)
+
 
 if __name__ == "__main__":
     unittest.main()
