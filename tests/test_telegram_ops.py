@@ -12,6 +12,7 @@ from autoforwarder.telegram_ops import (
     _message_text_as_html,
     _safe_media_filename,
     _send_album_as_bot,
+    _should_send_as_document_for_quality,
     _should_send_telegram_pm_alert,
 )
 
@@ -91,6 +92,20 @@ class TelegramOpsTests(unittest.IsolatedAsyncioTestCase):
         message = types.SimpleNamespace(file=file_meta)
         filename = _safe_media_filename(message)
         self.assertTrue(filename.endswith(".pdf"), filename)
+
+    def test_should_send_as_document_for_quality_video(self) -> None:
+        video_message = types.SimpleNamespace(video=True, video_note=False, document=None)
+        self.assertTrue(_should_send_as_document_for_quality(video_message))  # type: ignore[arg-type]
+
+        video_doc_message = types.SimpleNamespace(
+            video=False,
+            video_note=False,
+            document=types.SimpleNamespace(mime_type="video/mp4"),
+        )
+        self.assertTrue(_should_send_as_document_for_quality(video_doc_message))  # type: ignore[arg-type]
+
+        photo_message = types.SimpleNamespace(video=False, video_note=False, document=None, photo=object())
+        self.assertFalse(_should_send_as_document_for_quality(photo_message))  # type: ignore[arg-type]
 
     async def test_should_send_telegram_pm_alert_new_cycle_after_my_reply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -47,6 +47,7 @@ from .telegram_ops import (
     _send_album_as_bot,
     _send_media_as_bot,
     _send_telegram_pm_alert,
+    _should_send_as_document_for_quality,
     _should_send_telegram_pm_alert,
 )
 
@@ -417,6 +418,7 @@ async def main() -> None:
                 try:
                     if message.media:
                         caption = formatted_text
+                        force_document = _should_send_as_document_for_quality(message)
                         try:
                             send_result = await _send_media_as_bot(
                                 source_client=client,
@@ -424,6 +426,7 @@ async def main() -> None:
                                 bot_target_entity=forward_target_entity,
                                 message=message,
                                 caption=caption,
+                                force_document=force_document,
                             )
                             sent_target_message_id = _extract_message_id(send_result)
                         except Exception:
@@ -503,6 +506,9 @@ async def main() -> None:
             first_message_url = _build_message_url(source, album_messages[0].id)
             first_reply_quote_text = await _get_reply_quote_text(album_messages[0])
             forward_target_entity = _forward_target_entity_for_chat(event.chat_id)
+            force_document_album = bool(album_messages) and all(
+                _should_send_as_document_for_quality(item) for item in album_messages
+            )
 
             captions: list[str] = []
             for idx, message in enumerate(album_messages):
@@ -536,6 +542,7 @@ async def main() -> None:
                             bot_target_entity=forward_target_entity,
                             messages=album_messages,
                             captions=captions,
+                            force_document=force_document_album,
                         )
                         sent_target_ids = _extract_message_ids(send_result)
                     except Exception:
@@ -551,6 +558,7 @@ async def main() -> None:
                                     bot_target_entity=forward_target_entity,
                                     message=message,
                                     caption=captions[idx],
+                                    force_document=_should_send_as_document_for_quality(message),
                                 )
                                 sent_message_id = _extract_message_id(send_result)
                                 if sent_message_id is not None:

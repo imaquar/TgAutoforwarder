@@ -143,6 +143,18 @@ def _safe_media_filename(message: types.Message) -> str:
     return f"media{file_ext or ''}"
 
 
+def _should_send_as_document_for_quality(message: types.Message) -> bool:
+    # Sending video as a regular "video message" may be recompressed by Telegram.
+    # Upload as document to preserve original quality.
+    if bool(getattr(message, "video_note", False)):
+        return False
+    if bool(getattr(message, "video", False)):
+        return True
+    document = getattr(message, "document", None)
+    mime_type = getattr(document, "mime_type", None) if document is not None else None
+    return isinstance(mime_type, str) and mime_type.startswith("video/")
+
+
 def _build_message_url(chat_entity: Any, message_id: int) -> str | None:
     if not isinstance(chat_entity, types.Channel):
         return None
@@ -299,6 +311,7 @@ async def _send_media_as_bot(
     bot_target_entity: Any,
     message: types.Message,
     caption: str,
+    force_document: bool = False,
 ) -> Any:
     with tempfile.TemporaryDirectory(prefix="tgfwd_") as temp_dir:
         file_hint = os.path.join(temp_dir, _safe_media_filename(message))
@@ -310,6 +323,7 @@ async def _send_media_as_bot(
             caption=caption,
             link_preview=False,
             parse_mode="html",
+            force_document=force_document,
         )
 
 
@@ -357,6 +371,7 @@ async def _send_album_as_bot(
     bot_target_entity: Any,
     messages: list[types.Message],
     captions: list[str] | None,
+    force_document: bool = False,
 ) -> Any:
     with tempfile.TemporaryDirectory(prefix="tgfwd_album_") as temp_dir:
         files: list[str] = []
@@ -385,6 +400,7 @@ async def _send_album_as_bot(
                         bot_target_entity,
                         file=files,
                         link_preview=False,
+                        force_document=force_document,
                     )
                 return await bot_client.send_file(
                     bot_target_entity,
@@ -392,6 +408,7 @@ async def _send_album_as_bot(
                     caption=attempt_caption,
                     link_preview=False,
                     parse_mode="html",
+                    force_document=force_document,
                 )
             except Exception as exc:
                 last_exc = exc
