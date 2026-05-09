@@ -354,6 +354,90 @@ async def main() -> None:
             )
 
     if source_delivery_enabled:
+        chat_forward_locks: dict[int, asyncio.Lock] = {}
+        transient_rpc_errors: tuple[type[BaseException], ...] = tuple(
+            error_type
+            for error_type in (
+                getattr(errors, "ServerError", None),
+                getattr(errors, "RpcCallFailError", None),
+                getattr(errors, "TimedOutError", None),
+            )
+            if isinstance(error_type, type)
+        )
+
+        def _chat_lock(chat_id: int | None) -> asyncio.Lock | None:
+            if chat_id is None:
+                return None
+            existing = chat_forward_locks.get(chat_id)
+            if existing is not None:
+                return existing
+            new_lock = asyncio.Lock()
+            chat_forward_locks[chat_id] = new_lock
+            return new_lock
+
+        async def _run_with_retries(
+            action: str,
+            coro_factory: Any,
+            *,
+            max_attempts: int = 3,
+        ) -> Any:
+            attempt = 1
+            while True:
+                try:
+                    return await coro_factory()
+                except errors.FloodWaitError as exc:
+                    wait_seconds = max(1, int(getattr(exc, "seconds", 1)))
+                    if attempt >= max_attempts:
+                        raise
+                    logging.warning(
+                        "%s hit FloodWait (%ss). Retrying %s/%s...",
+                        action,
+                        wait_seconds,
+                        attempt + 1,
+                        max_attempts,
+                    )
+                    await asyncio.sleep(wait_seconds)
+                except transient_rpc_errors as exc:
+                    if attempt >= max_attempts:
+                        raise
+                    backoff = attempt
+                    logging.warning(
+                        "%s failed with transient RPC error (%s). Retrying %s/%s in %ss...",
+                        action,
+                        exc.__class__.__name__,
+                        attempt + 1,
+                        max_attempts,
+                        backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                except (asyncio.TimeoutError, OSError) as exc:
+                    if attempt >= max_attempts:
+                        raise
+                    backoff = attempt
+                    logging.warning(
+                        "%s failed with temporary error (%s). Retrying %s/%s in %ss...",
+                        action,
+                        exc.__class__.__name__,
+                        attempt + 1,
+                        max_attempts,
+                        backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                attempt += 1
+
+        async def _run_with_chat_lock_and_retries(
+            chat_id: int | None,
+            action: str,
+            coro_factory: Any,
+            *,
+            max_attempts: int = 3,
+        ) -> Any:
+            lock = _chat_lock(chat_id)
+            if lock is None:
+                return await _run_with_retries(action, coro_factory, max_attempts=max_attempts)
+            async with lock:
+                return await _run_with_retries(action, coro_factory, max_attempts=max_attempts)
+
         def _forward_target_entity_for_chat(chat_id: int | None) -> Any | None:
             if chat_id is None:
                 return None
@@ -420,21 +504,29 @@ async def main() -> None:
                         caption = formatted_text
                         force_document = _should_send_as_document_for_quality(message)
                         try:
-                            send_result = await _send_media_as_bot(
-                                source_client=client,
-                                bot_client=bot_client,
-                                bot_target_entity=forward_target_entity,
-                                message=message,
-                                caption=caption,
-                                force_document=force_document,
+                            send_result = await _run_with_chat_lock_and_retries(
+                                event.chat_id,
+                                f"telegram media forward from {source_title}",
+                                lambda: _send_media_as_bot(
+                                    source_client=client,
+                                    bot_client=bot_client,
+                                    bot_target_entity=forward_target_entity,
+                                    message=message,
+                                    caption=caption,
+                                    force_document=force_document,
+                                ),
                             )
                             sent_target_message_id = _extract_message_id(send_result)
                         except Exception:
-                            sent_msg = await bot_client.send_message(
-                                forward_target_entity,
-                                formatted_text,
-                                link_preview=False,
-                                parse_mode="html",
+                            sent_msg = await _run_with_chat_lock_and_retries(
+                                event.chat_id,
+                                f"telegram text fallback from {source_title}",
+                                lambda: bot_client.send_message(
+                                    forward_target_entity,
+                                    formatted_text,
+                                    link_preview=False,
+                                    parse_mode="html",
+                                ),
                             )
                             sent_target_message_id = _extract_message_id(sent_msg)
                     else:
@@ -442,11 +534,15 @@ async def main() -> None:
                             # Skip text-only forwarding to Telegram if there is no text.
                             pass
                         else:
-                            sent_msg = await bot_client.send_message(
-                                forward_target_entity,
-                                formatted_text,
-                                link_preview=False,
-                                parse_mode="html",
+                            sent_msg = await _run_with_chat_lock_and_retries(
+                                event.chat_id,
+                                f"telegram text forward from {source_title}",
+                                lambda: bot_client.send_message(
+                                    forward_target_entity,
+                                    formatted_text,
+                                    link_preview=False,
+                                    parse_mode="html",
+                                ),
                             )
                             sent_target_message_id = _extract_message_id(sent_msg)
 
@@ -536,13 +632,17 @@ async def main() -> None:
             if settings.forwarding_enabled and forward_target_entity is not None:
                 try:
                     try:
-                        send_result = await _send_album_as_bot(
-                            source_client=client,
-                            bot_client=bot_client,
-                            bot_target_entity=forward_target_entity,
-                            messages=album_messages,
-                            captions=captions,
-                            force_document=force_document_album,
+                        send_result = await _run_with_chat_lock_and_retries(
+                            event.chat_id,
+                            f"telegram album forward from {source_title}",
+                            lambda: _send_album_as_bot(
+                                source_client=client,
+                                bot_client=bot_client,
+                                bot_target_entity=forward_target_entity,
+                                messages=album_messages,
+                                captions=captions,
+                                force_document=force_document_album,
+                            ),
                         )
                         sent_target_ids = _extract_message_ids(send_result)
                     except Exception:
@@ -552,13 +652,17 @@ async def main() -> None:
                         )
                         for idx, message in enumerate(album_messages):
                             try:
-                                send_result = await _send_media_as_bot(
-                                    source_client=client,
-                                    bot_client=bot_client,
-                                    bot_target_entity=forward_target_entity,
-                                    message=message,
-                                    caption=captions[idx],
-                                    force_document=_should_send_as_document_for_quality(message),
+                                send_result = await _run_with_chat_lock_and_retries(
+                                    event.chat_id,
+                                    f"telegram album item forward from {source_title}",
+                                    lambda: _send_media_as_bot(
+                                        source_client=client,
+                                        bot_client=bot_client,
+                                        bot_target_entity=forward_target_entity,
+                                        message=message,
+                                        caption=captions[idx],
+                                        force_document=_should_send_as_document_for_quality(message),
+                                    ),
                                 )
                                 sent_message_id = _extract_message_id(send_result)
                                 if sent_message_id is not None:
@@ -801,12 +905,16 @@ async def main() -> None:
             )
 
             try:
-                await bot_client.edit_message(
-                    forward_target_entity,
-                    mapped_target_message_id,
-                    formatted_text,
-                    link_preview=False,
-                    parse_mode="html",
+                await _run_with_chat_lock_and_retries(
+                    event.chat_id,
+                    f"telegram edit forward from {source_title}",
+                    lambda: bot_client.edit_message(
+                        forward_target_entity,
+                        mapped_target_message_id,
+                        formatted_text,
+                        link_preview=False,
+                        parse_mode="html",
+                    ),
                 )
                 logging.info("Edited forwarded message from %s", source_title)
             except errors.MessageNotModifiedError:
